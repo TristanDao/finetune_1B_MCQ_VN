@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "temprun"
+version = "0.1.0"
+description = "Finetune small LLM (<1B) for Vietnamese multiple-choice QA on news (Tempo Run 2025)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "TristanDao" }]
+keywords = ["llm", "finetune", "qlora", "vietnamese", "mcq", "tempo-run-2025"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Natural Language :: Vietnamese",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "transformers>=4.45.0",
+  "datasets>=2.20.0",
+  "accelerate>=0.34.0",
+  "peft>=0.11.0",
+  "trl>=0.11.0",
+  "bitsandbytes>=0.43.0",
+  "torch>=2.3.0",
+  "sentencepiece>=0.2.0",
+  "protobuf>=5.0.0",
+  "tqdm>=4.66.0",
+  "pandas>=2.2.0",
+  "scikit-learn>=1.5.0",
+  "pyyaml>=6.0",
+  "python-dotenv>=1.0.0",
+  "kagglehub>=0.3.0",
+  "huggingface-hub>=0.24.0",
+  "openai>=1.40.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "pytest-cov>=5.0.0",
+  "ruff>=0.6.0",
+  "ipykernel>=6.29.0",
+]
+
+[project.scripts]
+temprun-train = "temprun.cli:main"
+
+[project.urls]
+"Homepage" = "https://github.com/TristanDao/finetune_1B_MCQ_VN"
+"Bug Tracker" = "https://github.com/TristanDao/finetune_1B_MCQ_VN/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["temprun*"]
+
+[tool.setuptools.package-data]
+temprun = ["py.typed"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra -q"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "W"]
+ignore = ["E501", "B008"]

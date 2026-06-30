@@ -1,0 +1,50 @@
+# QLoRA 4-bit finetune trên Qwen3-0.6B-Instruct
+# Nhẹ, train nhanh (~30-60 phút trên A100), dễ iterate.
+extends: base.yaml
+
+run_name: qlora_qwen3_0_6b
+model_name: Qwen/Qwen3-0.6B-Instruct
+
+# Quant
+quant:
+  load_in_4bit: true
+  bnb_4bit_quant_type: nf4
+  bnb_4bit_use_double_quant: true
+  bnb_4bit_compute_dtype: bfloat16
+
+# LoRA
+lora:
+  r: 32
+  alpha: 16
+  dropout: 0.05
+  bias: none
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+# Training
+training:
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 8
+  gradient_accumulation_steps: 8          # effective batch = 32
+  num_train_epochs: 3
+  max_steps: -1                           # -1 = dùng epochs
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.06
+  lr_scheduler_type: cosine
+  logging_steps: 20
+  eval_steps: 200
+  save_steps: 200
+  save_total_limit: 2
+  max_grad_norm: 0.3
+  optim: adamw_bnb_8bit
+  gradient_checkpointing: true
+  packing: true
+  assistant_only_loss: true
+  seed: 3407

@@ -1,0 +1,122 @@
+# finetune_1B_MCQ_VN
+
+End-to-end fine-tuning of a sub-1B LLM on Vietnamese multiple-choice reading
+comprehension. Built around the Tempo Run 2025 competition
+([UIT](https://www.uit.edu.vn/), Vietnam) and packaged as a reusable MLOps template.
+
+> **Task**: given a Vietnamese news article and a 4-way MCQ, predict the correct
+> option (A/B/C/D). 4,491 training questions over 1,500 articles, ~1,500 test
+> questions. Model parameter cap: 1B.
+
+## Highlights
+
+- **QLoRA + Full FT, side by side** on the same data with identical configs
+- **Sub-1B base** (`Qwen3-0.6B-Instruct`) so the whole thing fits a single A100
+- **Vietnamese prompt, single-token target** → fast argmax-on-logits inference,
+  5–10× faster than greedy decoding
+- **Reproducible from a fresh VM** in <15 min: clone → `pip install -e .` →
+  data download → train → eval → submission CSV
+- **Data discipline**: dataset hosted on a private HF repo, never committed
+  to git; raw data, artifacts, and submissions all gitignored
+
+## Results
+
+| Method                          | Trainable params | Hold-out acc | Public test |
+|---------------------------------|------------------|--------------|-------------|
+| Qwen3-0.6B-Instruct (zero-shot) | 0                | _TBD_        | _TBD_       |
+| Qwen3-0.6B + QLoRA (r=32)       | ~3M              | _TBD_        | _TBD_       |
+| Qwen3-0.6B + Full FT            | ~600M            | _TBD_        | _TBD_       |
+
+> Eval JSONs land in `artifacts/<run>/eval_details.jsonl.summary.json` after
+> each training run. Update this table when numbers come in.
+
+## Stack
+
+- **Model**: [Qwen/Qwen3-0.6B-Instruct](https://huggingface.co/Qwen/Qwen3-0.6B-Instruct)
+- **Training**: `transformers` · `peft` (LoRA) · `trl` (SFTTrainer) · `bitsandbytes` (4-bit)
+- **Data enrichment** (optional): Alibaba DashScope `qwen3-max-preview`
+- **Distribution**: HF Hub — private dataset for raw data, public/private repo for the trained adapter
+- **Compute**: Google Colab Pro+ (A100 40/80GB)
+
+## Architecture
+
+```
+raw data  →  HF private dataset  ──┐
+                                   ├──> download_data.py
+                                   ▼
+                          data/raw/{train,test}/
+                                   │
+                                   ▼
+                         make_sft_jsonl.py
+                                   │
+                                   ▼
+                data/processed/{train,eval}.jsonl
+                                   │
+                ┌──────────────────┴──────────────────┐
+                ▼                                     ▼
+         enrich_data.py (optional)            train.py
+              (Qwen3 paraphrase)            (QLoRA or Full FT)
+                │                                   │
+                └─────────────┬─────────────────────┘
+                              ▼
+                       evaluate.py  →  accuracy, confusion, JSONL
+                              │
+                              ▼
+                         infer.py  →  submissions/sub_<run>.csv
+```
+
+## Layout
+
+```
+src/temprun/        # Reusable Python package
+  prompts.py        # Vietnamese prompt construction
+  data.py           # JSON → SFT JSONL with stratified split
+  enrich.py         # Qwen3 API client for synthetic data
+  train.py          # SFT trainer (QLoRA + Full FT)
+  evaluate.py       # Batch inference, accuracy, confusion
+  infer.py          # Submission CSV generation
+scripts/            # CLI entrypoints — one per pipeline stage
+configs/            # YAML hyperparameter files
+notebooks/          # Colab glue — one notebook per stage
+tests/              # pytest smoke tests
+```
+
+## Quick start
+
+```bash
+git clone https://github.com/TristanDao/finetune_1B_MCQ_VN
+cd finetune_1B_MCQ_VN
+pip install -e .
+cp .env.example .env                 # fill HF_TOKEN, HF_DATASET_REPO
+
+python scripts/download_data.py
+python scripts/make_sft_jsonl.py
+python scripts/train.py --config configs/qlora_qwen3_0_6b.yaml
+python scripts/evaluate.py --checkpoint artifacts/qlora_qwen3_0_6b
+python scripts/infer.py    --checkpoint artifacts/qlora_qwen3_0_6b \
+                            --test-dir  data/raw/test \
+                            --out       submissions/sub_qlora_public.csv
+PYTHONPATH=src pytest -q              # 33 tests
+```
+
+For the Colab walkthrough see [`COLAB_GUIDE.md`](./COLAB_GUIDE.md). For the
+agent contract / project conventions see [`AGENT.md`](./AGENT.md).
+
+## Engineering choices
+
+- **Sub-1B base** (`Qwen3-0.6B-Instruct`): respects the hard parameter cap and
+  keeps the QLoRA-vs-FT comparison honest (both fit comfortably on an A100).
+- **`assistant_only_loss=True`** in TRL: loss is computed only on the
+  single-character response, not on the system/user prompt — prevents the
+  model from memorising the question template.
+- **Deterministic A–D ordering** in the prompt, single-token output →
+  evaluator uses argmax-over-logits inference (no generation loop).
+- **Stratified 90/10 split on the answer label**: `D` is only ~3% of the data,
+  so naïve splits risk an eval set with no D examples.
+- **Private HF dataset for the corpus**: the competition forbids
+  redistributing the data; private HF repos give us reproducible-by-token
+  downloads without leaking data into git history.
+
+## License
+
+MIT
