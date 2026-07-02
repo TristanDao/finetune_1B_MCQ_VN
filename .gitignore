@@ -101,3 +101,4 @@ kaggle.json
 tmp/
 temp/
 # COLAB_GUIDE.md
+notebooks/full_pipeline.ipynb

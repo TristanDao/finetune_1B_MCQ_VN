@@ -53,9 +53,17 @@ else:
 ```
 
 **Block 0.3 — Install deps**
+
+`uv` (recommended, faster, reproducible via `uv.lock`):
+```python
+!pip install -q uv
+!uv sync --extra dev
+```
+
+`pip` (fallback, works without `uv`):
 ```python
 !pip install -q -e .
-!pip install -q -r requirements.txt
+!pip install -q -r requirements-dev.txt
 ```
 
 **Block 0.4 — Write `.env`** (fill the values, then run)
