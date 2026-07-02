@@ -77,13 +77,23 @@ def make_row(
         {
           "messages": [system, user, assistant?],
           "label": "A"|"B"|"C"|"D",   # for eval only
+          "title": str,
+          "content": str,
+          "question": str,
+          "choices": dict[str, str],
           "row_id": "..."              # optional, for submission
         }
     """
     user = build_user_instruction(title, content, question, choices)
     assistant = label.strip().upper()[:1] if label is not None else None
     msgs = build_chat_messages(system_prompt, user, assistant=assistant)
-    row: dict[str, Any] = {"messages": msgs}
+    row: dict[str, Any] = {
+        "messages": msgs,
+        "title": title,
+        "content": content,
+        "question": question,
+        "choices": choices,
+    }
     if label is not None:
         row["label"] = label.strip().upper()[:1]
     return row
