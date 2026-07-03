@@ -12,6 +12,7 @@ import json
 import os
 import random
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -20,6 +21,10 @@ from openai import AsyncOpenAI, OpenAI
 from .utils import ensure_dir, load_env
 
 VALID_LABELS = frozenset({"A", "B", "C", "D"})
+
+# Type alias for the optional per-completion callback passed into the pass
+# functions. Signature: on_progress(phase, done, total, new_row_or_none).
+OnProgress = Callable[[str, int, int, "dict | None"], None]
 
 
 def get_client() -> OpenAI:
@@ -455,7 +460,10 @@ def _log_progress(
     every: int = 25,
 ) -> None:
     """Print a one-line heartbeat when `done` hits the heartbeat boundary
-    or when the phase finishes. Cheap when `every > total` (e.g. tiny inputs)."""
+    or when the phase finishes. Cheap when `every > total` (e.g. tiny inputs).
+    Uses `flush=True` so the line is visible immediately in pipe-buffered
+    contexts (Colab/Jupyter `!python` invocation) instead of batching into
+    ~8KB stdout blocks."""
     if done == 0:
         return
     if done == total or done % every == 0:
@@ -464,7 +472,8 @@ def _log_progress(
             f"paraphrase={counter['paraphrase']} "
             f"explain={counter['explain']} "
             f"synth={counter['synth']} "
-            f"errors={counter['errors']}"
+            f"errors={counter['errors']}",
+            flush=True,
         )
 
 
@@ -494,6 +503,7 @@ def _run_passes_sync(
     synth_max: int,
     model_name: str,
     progress_every: int = 25,
+    on_progress: OnProgress | None = None,
 ) -> tuple[list[dict], dict[str, int], dict[str, dict]]:
     """Sequential (concurrency=1) implementation of the two passes."""
     client = get_client()
@@ -509,9 +519,9 @@ def _run_passes_sync(
     explain_total = len(eligible) if explain else 0
 
     if paraphrase and paraphrase_total:
-        print(f"[enrich] paraphrase: starting {paraphrase_total} jobs (sequential)")
+        print(f"[enrich] paraphrase: starting {paraphrase_total} jobs (sequential)", flush=True)
     if explain:
-        print(f"[enrich] explain: starting {explain_total} jobs (sequential)")
+        print(f"[enrich] explain: starting {explain_total} jobs (sequential)", flush=True)
 
     # ---- Pass 1: paraphrase + explain ----
     paraphrase_done = 0
@@ -537,6 +547,8 @@ def _run_passes_sync(
                     continue
                 written.append(new_row)
                 counter["paraphrase"] += 1
+                if on_progress is not None:
+                    on_progress("paraphrase", paraphrase_done + 1, paraphrase_total, new_row)
             paraphrase_done += 1
             cache[p_key] = {**entry, "paraphrase": True}
         if paraphrase_total:
@@ -568,6 +580,8 @@ def _run_passes_sync(
                 counter["errors"] += 1
                 print(f"[enrich] explain {e_key[:8]} failed: {e}")
             explain_done += 1
+            if on_progress is not None:
+                on_progress("explain", explain_done, explain_total, None)
             _log_progress(
                 "explain", explain_done, explain_total, counter, every=progress_every
             )
@@ -586,7 +600,7 @@ def _run_passes_sync(
             }
             synth_total = sum(needs.values())
             if synth_total:
-                print(f"[enrich] synth: starting up to {synth_total} targeted jobs (sequential)")
+                print(f"[enrich] synth: starting up to {synth_total} targeted jobs (sequential)", flush=True)
             synth_done = 0
             for r in candidates:
                 if not needs:
@@ -619,6 +633,8 @@ def _run_passes_sync(
                             written.append(new_row)
                             counter["synth"] += 1
                             needs[lbl] -= 1
+                            if on_progress is not None:
+                                on_progress("synth", synth_done + 1, synth_total, new_row)
                         break  # one attempt per slot, even on miss
                     synth_done += 1
                     _log_progress(
@@ -627,7 +643,7 @@ def _run_passes_sync(
         else:
             synth_total = min(synth_max, len(candidates))
             if synth_total:
-                print(f"[enrich] synth: starting {synth_total} jobs (sequential)")
+                print(f"[enrich] synth: starting {synth_total} jobs (sequential)", flush=True)
             for i, r in enumerate(candidates[:synth_max], start=1):
                 s_key = _hash(r["title"] + "|synth|generic")
                 entry = cache.get(s_key, {})
@@ -647,6 +663,8 @@ def _run_passes_sync(
                     continue
                 written.append(new_row)
                 counter["synth"] += 1
+                if on_progress is not None:
+                    on_progress("synth", i, synth_total, new_row)
                 cache[s_key] = {**entry, "synth": True}
                 _log_progress(
                     "synth", i, synth_total, counter, every=progress_every
@@ -669,6 +687,7 @@ async def _run_passes_async(
     model_name: str,
     concurrency: int,
     progress_every: int = 25,
+    on_progress: OnProgress | None = None,
 ) -> tuple[list[dict], dict[str, int], dict[str, dict]]:
     """Concurrent implementation: collects jobs in the main coroutine, then
     fires them through an `asyncio.Semaphore(concurrency)` so at most
@@ -706,7 +725,8 @@ async def _run_passes_async(
             total = len(paraphrase_jobs)
             print(
                 f"[enrich] paraphrase: starting {total} jobs "
-                f"(concurrency={concurrency})"
+                f"(concurrency={concurrency})",
+                flush=True,
             )
             t0 = time.monotonic()
             coros = [_run_paraphrase(r, n, k) for r, n, k in paraphrase_jobs]
@@ -726,12 +746,15 @@ async def _run_passes_async(
                 if new_row is not None:
                     written.append(new_row)
                     counter["paraphrase"] += 1
+                    if on_progress is not None:
+                        on_progress("paraphrase", done_count, total, new_row)
                 _log_progress(
                     "paraphrase", done_count, total, counter, every=progress_every
                 )
             print(
                 f"[enrich] paraphrase: done in {time.monotonic() - t0:.1f}s | "
-                f"counters={counter}"
+                f"counters={counter}",
+                flush=True,
             )
         else:
             for _, _, p_key in paraphrase_jobs:
@@ -758,7 +781,8 @@ async def _run_passes_async(
             total = len(explain_jobs)
             print(
                 f"[enrich] explain: starting {total} jobs "
-                f"(concurrency={concurrency})"
+                f"(concurrency={concurrency})",
+                flush=True,
             )
             t0 = time.monotonic()
             coros = [_run_explain(r, k) for r, k in explain_jobs]
@@ -777,12 +801,15 @@ async def _run_passes_async(
                 if explanation is not None:
                     counter["explain"] += 1
                     cache[e_key] = {**cache.get(e_key, {}), "explanation": explanation}
+                if on_progress is not None:
+                    on_progress("explain", done_count, total, None)
                 _log_progress(
                     "explain", done_count, total, counter, every=progress_every
                 )
             print(
                 f"[enrich] explain: done in {time.monotonic() - t0:.1f}s | "
-                f"counters={counter}"
+                f"counters={counter}",
+                flush=True,
             )
 
         # ---- Pass 2: synth ----
@@ -799,7 +826,8 @@ async def _run_passes_async(
                 synth_total = sum(needs.values())
                 if synth_total:
                     print(
-                        f"[enrich] synth: starting up to {synth_total} targeted jobs (sequential)"
+                        f"[enrich] synth: starting up to {synth_total} targeted jobs (sequential)",
+                        flush=True,
                     )
                 synth_done = 0
                 t0 = time.monotonic()
@@ -834,6 +862,8 @@ async def _run_passes_async(
                                 written.append(new_row)
                                 counter["synth"] += 1
                                 needs[lbl] -= 1
+                                if on_progress is not None:
+                                    on_progress("synth", synth_done + 1, synth_total, new_row)
                             break
                         synth_done += 1
                         _log_progress(
@@ -842,7 +872,8 @@ async def _run_passes_async(
                 if synth_total:
                     print(
                         f"[enrich] synth: done in {time.monotonic() - t0:.1f}s | "
-                        f"counters={counter}"
+                        f"counters={counter}",
+                        flush=True,
                     )
             else:
                 synth_jobs: list[tuple[dict, str]] = []
@@ -865,7 +896,8 @@ async def _run_passes_async(
                     total = len(synth_jobs)
                     print(
                         f"[enrich] synth: starting {total} jobs "
-                        f"(concurrency={concurrency})"
+                        f"(concurrency={concurrency})",
+                        flush=True,
                     )
                     t0 = time.monotonic()
                     coros = [_run_synth(r, k) for r, k in synth_jobs]
@@ -885,12 +917,15 @@ async def _run_passes_async(
                         if new_row is not None:
                             written.append(new_row)
                             counter["synth"] += 1
+                            if on_progress is not None:
+                                on_progress("synth", done_count, total, new_row)
                         _log_progress(
                             "synth", done_count, total, counter, every=progress_every
                         )
                     print(
                         f"[enrich] synth: done in {time.monotonic() - t0:.1f}s | "
-                        f"counters={counter}"
+                        f"counters={counter}",
+                        flush=True,
                     )
 
     return written, counter, cache
@@ -966,11 +1001,48 @@ def enrich_dataset(
     if cache_path.exists():
         cache = json.loads(cache_path.read_text(encoding="utf-8"))
 
-    use_async = concurrency and concurrency > 1
-    if use_async:
-        try:
-            written, counter, cache = asyncio.run(
-                _run_passes_async(
+    # Open output JSONL once; write originals now, then keep the handle open
+    # so new rows are appended as they complete. This guarantees the file is
+    # always up-to-date on disk — a SIGKILL at any point loses at most
+    # `progress_every - 1` rows of new work, never the whole run.
+    out_handle = open(out_path, "w", encoding="utf-8")
+    for r in rows:
+        out_handle.write(json.dumps(_slim_row(r), ensure_ascii=False) + "\n")
+    out_handle.flush()
+
+    def _on_progress(phase: str, done: int, total: int, new_row: dict | None) -> None:
+        """Append new row (if any) to the output file and flush cache every
+        `progress_every` completions so a Colab reset can resume cheaply."""
+        if new_row is not None:
+            out_handle.write(json.dumps(_slim_row(new_row), ensure_ascii=False) + "\n")
+            out_handle.flush()
+        if done == total or done % progress_every == 0:
+            cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+
+    try:
+        use_async = concurrency and concurrency > 1
+        if use_async:
+            try:
+                written, counter, cache = asyncio.run(
+                    _run_passes_async(
+                        rows=rows,
+                        cache=cache,
+                        plan=plan,
+                        effective_balance=effective_balance,
+                        paraphrase=paraphrase,
+                        explain=explain,
+                        synth=synth,
+                        synth_retry=synth_retry,
+                        synth_max=synth_max,
+                        model_name=model_name,
+                        concurrency=concurrency,
+                        progress_every=progress_every,
+                        on_progress=_on_progress,
+                    )
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"[enrich] async path failed ({e}); falling back to sync")
+                written, counter, cache = _run_passes_sync(
                     rows=rows,
                     cache=cache,
                     plan=plan,
@@ -981,12 +1053,10 @@ def enrich_dataset(
                     synth_retry=synth_retry,
                     synth_max=synth_max,
                     model_name=model_name,
-                    concurrency=concurrency,
                     progress_every=progress_every,
+                    on_progress=_on_progress,
                 )
-            )
-        except Exception as e:  # noqa: BLE001
-            print(f"[enrich] async path failed ({e}); falling back to sync")
+        else:
             written, counter, cache = _run_passes_sync(
                 rows=rows,
                 cache=cache,
@@ -999,34 +1069,14 @@ def enrich_dataset(
                 synth_max=synth_max,
                 model_name=model_name,
                 progress_every=progress_every,
+                on_progress=_on_progress,
             )
-    else:
-        written, counter, cache = _run_passes_sync(
-            rows=rows,
-            cache=cache,
-            plan=plan,
-            effective_balance=effective_balance,
-            paraphrase=paraphrase,
-            explain=explain,
-            synth=synth,
-            synth_retry=synth_retry,
-            synth_max=synth_max,
-            model_name=model_name,
-            progress_every=progress_every,
-        )
-
-    # Persist cache
-    cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
-
-    # Append to original (slim schema: messages + label + optional _source).
-    # `train.py` and `scripts/evaluate.py` only read `messages` (+ `label`),
-    # so we drop the redundant top-level title/content/question/choices/row_id
-    # that came from `train.jsonl`. See `_slim_row` for the schema.
-    with open(out_path, "w", encoding="utf-8") as f:
-        for r in rows:
-            f.write(json.dumps(_slim_row(r), ensure_ascii=False) + "\n")
-        for r in written:
-            f.write(json.dumps(_slim_row(r), ensure_ascii=False) + "\n")
+    finally:
+        # Final flush in case `progress_every` did not divide `total` evenly
+        # and so the file handle is closed cleanly on Ctrl+C / async failure.
+        out_handle.flush()
+        cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+        out_handle.close()
 
     print(f"[enrich] done. counters={counter} out={out_path}")
     return counter

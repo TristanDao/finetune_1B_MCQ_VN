@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -349,3 +350,119 @@ def test_enrich_dataset_async_failure_falls_back_to_sync(monkeypatch, tmp_path, 
     assert called["sync"] == 1
     captured = capsys.readouterr()
     assert "falling back to sync" in captured.out
+
+
+# -----------------------------------------------------------------------------
+# Incremental save (cache + enriched.jsonl flushed periodically)
+# -----------------------------------------------------------------------------
+
+def _make_input_rows(n: int, path: Path) -> None:
+    """Write a synthetic input JSONL with `n` eligible rows."""
+    import json
+    rows = []
+    for i in range(n):
+        rows.append({
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": f"q{i}?"},
+                {"role": "assistant", "content": "A"},
+            ],
+            "title": f"title-{i}",
+            "content": "x" * 500,
+            "question": f"q{i}?",
+            "choices": {"A": "1", "B": "2", "C": "3", "D": "4"},
+            "label": "A",
+            "row_id": f"art{i}__1",
+        })
+    path.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
+
+
+def test_enrich_dataset_flushes_cache_incrementally(monkeypatch, tmp_path):
+    """Cache file must be written periodically during the run, not only at the end."""
+    from temprun import enrich as enrich_mod
+
+    inp = tmp_path / "in.jsonl"
+    out = tmp_path / "out.jsonl"
+    _make_input_rows(20, inp)
+
+    def fake_sync(rows, cache, plan, effective_balance, **kwargs):
+        on_progress = kwargs.get("on_progress")
+        # Simulate 20 completions.
+        for i in range(1, 21):
+            cache[f"key-{i}"] = {"paraphrase": True}
+            if on_progress is not None:
+                on_progress("paraphrase", i, 20, {"messages": [], "label": "A"})
+        return [{"messages": [], "label": "A"}] * 20, {
+            "paraphrase": 20, "explain": 0, "synth": 0, "skipped": 0,
+            "errors": 0, "paraphrase_attempts": 20, "synth_attempts": 0,
+        }, cache
+
+    monkeypatch.setattr(enrich_mod, "_run_passes_sync", fake_sync)
+
+    enrich_dataset(inp, out, concurrency=1, progress_every=5)
+
+    cache_path = out.with_suffix(out.suffix + ".cache.json")
+    assert cache_path.exists(), "cache file must exist after the run"
+    final_cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert len(final_cache) == 20, f"expected 20 cache entries, got {len(final_cache)}"
+
+
+def test_enrich_dataset_appends_output_incrementally(monkeypatch, tmp_path):
+    """Output file must contain originals + new rows when the run finishes."""
+    from temprun import enrich as enrich_mod
+
+    inp = tmp_path / "in.jsonl"
+    out = tmp_path / "out.jsonl"
+    _make_input_rows(15, inp)
+
+    def fake_sync(rows, cache, plan, effective_balance, **kwargs):
+        on_progress = kwargs.get("on_progress")
+        for i in range(1, 11):
+            if on_progress is not None:
+                on_progress("paraphrase", i, 10, {"messages": [{"role": "system", "content": f"new-{i}"}], "label": "A", "_source": "paraphrase"})
+        return (
+            [{"messages": [{"role": "system", "content": f"new-{i}"}], "label": "A", "_source": "paraphrase"} for i in range(1, 11)],
+            {"paraphrase": 10, "explain": 0, "synth": 0, "skipped": 0,
+             "errors": 0, "paraphrase_attempts": 10, "synth_attempts": 0},
+            cache,
+        )
+
+    monkeypatch.setattr(enrich_mod, "_run_passes_sync", fake_sync)
+
+    enrich_dataset(inp, out, concurrency=1, progress_every=2)
+
+    out_lines = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line]
+    # 15 originals + 10 new = 25 total
+    assert len(out_lines) == 25, f"expected 25 lines, got {len(out_lines)}"
+    new_rows = [r for r in out_lines if r.get("_source") == "paraphrase"]
+    assert len(new_rows) == 10, f"expected 10 new rows, got {len(new_rows)}"
+
+
+def test_enrich_dataset_preserves_cache_on_exception(monkeypatch, tmp_path):
+    """If the pass function raises mid-run, the cache + output must still be flushed via the finally block."""
+    from temprun import enrich as enrich_mod
+
+    inp = tmp_path / "in.jsonl"
+    out = tmp_path / "out.jsonl"
+    _make_input_rows(5, inp)
+
+    def fake_sync(rows, cache, plan, effective_balance, **kwargs):
+        on_progress = kwargs.get("on_progress")
+        for i in range(1, 4):
+            cache[f"k-{i}"] = {"paraphrase": True}
+            if on_progress is not None:
+                on_progress("paraphrase", i, 10, {"messages": [], "label": "A"})
+        raise RuntimeError("simulated failure")
+
+    monkeypatch.setattr(enrich_mod, "_run_passes_sync", fake_sync)
+
+    with pytest.raises(RuntimeError, match="simulated failure"):
+        enrich_dataset(inp, out, concurrency=1, progress_every=2)
+
+    cache_path = out.with_suffix(out.suffix + ".cache.json")
+    assert cache_path.exists(), "cache must be flushed even when the pass function raises"
+    final_cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert len(final_cache) == 3, f"expected 3 cache entries from mid-run, got {len(final_cache)}"
+
+    out_lines = [line for line in out.read_text(encoding="utf-8").splitlines() if line]
+    assert len(out_lines) == 5 + 3, f"expected 5 originals + 3 new = 8 lines, got {len(out_lines)}"
