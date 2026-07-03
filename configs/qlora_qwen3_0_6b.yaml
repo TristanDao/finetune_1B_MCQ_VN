@@ -1,9 +1,9 @@
-# QLoRA 4-bit finetune trên Qwen3-0.6B-Instruct
+# QLoRA 4-bit finetune trên Qwen3-0.6B
 # Nhẹ, train nhanh (~30-60 phút trên A100), dễ iterate.
 extends: base.yaml
 
 run_name: qlora_qwen3_0_6b
-model_name: Qwen/Qwen3-0.6B-Instruct
+model_name: Qwen/Qwen3-0.6B
 
 # Quant
 quant:

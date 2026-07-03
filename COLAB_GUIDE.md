@@ -382,7 +382,7 @@ elif MODE == "merged":
     from peft import PeftModel
     from transformers import AutoModelForCausalLM, AutoTokenizer
     import torch
-    base = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-0.6B-Instruct", torch_dtype=torch.bfloat16, device_map="cpu")
+    base = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-0.6B", torch_dtype=torch.bfloat16, device_map="cpu")
     model = PeftModel.from_pretrained(base, f"artifacts/{RUN}").merge_and_unload()
     tok = AutoTokenizer.from_pretrained(f"artifacts/{RUN}")
     out = f"artifacts/{RUN}_merged"

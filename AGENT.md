@@ -11,7 +11,7 @@ test sets. Constraint: total model params < 1B; no test-set leakage.
 ## Locked decisions
 | | Choice | Why |
 |---|---|---|
-| Base model | `Qwen/Qwen3-0.6B-Instruct` | <1B cap, decent Vietnamese, sub-1s inference |
+| Base model | `Qwen/Qwen3-0.6B` | <1B cap, decent Vietnamese, sub-1s inference |
 | Methods | QLoRA 4-bit + Full FT bf16, side by side | Compare on identical data, A100 budget |
 | Sequence length | 2048 | Covers ~80% of articles (median 1.2k tokens) |
 | Prompt | Vietnamese, deterministic A–D order, single-token target | Fast argmax inference |

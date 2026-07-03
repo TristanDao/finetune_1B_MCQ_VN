@@ -1,10 +1,10 @@
-# Full fine-tune bf16 trên Qwen3-0.6B-Instruct
+# Full fine-tune bf16 trên Qwen3-0.6B
 # Tốn VRAM hơn QLoRA nhưng chất lượng thường cao hơn.
 # Chỉ chạy trên A100 40/80GB.
 extends: base.yaml
 
 run_name: fullft_qwen3_0_6b
-model_name: Qwen/Qwen3-0.6B-Instruct
+model_name: Qwen/Qwen3-0.6B
 
 # Không quant
 quant: null

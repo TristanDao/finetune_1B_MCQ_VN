@@ -11,7 +11,7 @@ comprehension. Built around the Tempo Run 2025 competition
 ## Highlights
 
 - **QLoRA + Full FT, side by side** on the same data with identical configs
-- **Sub-1B base** (`Qwen3-0.6B-Instruct`) so the whole thing fits a single A100
+- **Sub-1B base** (`Qwen3-0.6B`) so the whole thing fits a single A100
 - **Vietnamese prompt, single-token target** → fast argmax-on-logits inference,
   5–10× faster than greedy decoding
 - **Reproducible from a fresh VM** in <15 min: clone → `pip install -e .` →
@@ -23,7 +23,7 @@ comprehension. Built around the Tempo Run 2025 competition
 
 | Method                          | Trainable params | Hold-out acc | Public test |
 |---------------------------------|------------------|--------------|-------------|
-| Qwen3-0.6B-Instruct (zero-shot) | 0                | _TBD_        | _TBD_       |
+| Qwen3-0.6B (zero-shot) | 0                | _TBD_        | _TBD_       |
 | Qwen3-0.6B + QLoRA (r=32)       | ~3M              | _TBD_        | _TBD_       |
 | Qwen3-0.6B + Full FT            | ~600M            | _TBD_        | _TBD_       |
 
@@ -32,7 +32,7 @@ comprehension. Built around the Tempo Run 2025 competition
 
 ## Stack
 
-- **Model**: [Qwen/Qwen3-0.6B-Instruct](https://huggingface.co/Qwen/Qwen3-0.6B-Instruct)
+- **Model**: [Qwen/Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B)
 - **Training**: `transformers` · `peft` (LoRA) · `trl` (SFTTrainer) · `bitsandbytes` (4-bit)
 - **Data enrichment** (optional): Alibaba DashScope `qwen3-max-preview`
 - **Distribution**: HF Hub — private dataset for raw data, public/private repo for the trained adapter
@@ -132,7 +132,7 @@ uv sync --no-dev                       # prod only
 
 ## Engineering choices
 
-- **Sub-1B base** (`Qwen3-0.6B-Instruct`): respects the hard parameter cap and
+- **Sub-1B base** (`Qwen3-0.6B`): respects the hard parameter cap and
   keeps the QLoRA-vs-FT comparison honest (both fit comfortably on an A100).
 - **`assistant_only_loss=True`** in TRL: loss is computed only on the
   single-character response, not on the system/user prompt — prevents the
