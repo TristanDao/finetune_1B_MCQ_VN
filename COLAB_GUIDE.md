@@ -154,11 +154,55 @@ print(out)
 ```
 
 ```bash
+# Script sẽ in: model đang dùng + heartbeat progress mỗi 25 hàng (sync)
+# hoặc 'starting/done' lines mỗi phase (async). Đổi tần suất bằng --progress-every N.
+# Thêm --push-after để backup enriched + cache lên HF sau khi xong
+# (tránh mất tiền API khi Colab reset). Cần HF_TOKEN write scope trong .env.
 !python scripts/enrich_data.py \
     --in  data/processed/train.jsonl \
     --out data/processed/enriched.jsonl
 !python scripts/merge_enriched.py
 ```
+
+**Backup lên HF (khuyến nghị khi chạy Colab):** file `enriched.jsonl` + cache API
+response sẽ được push lên cùng repo `${HF_DATASET_REPO}` vào sub-folder
+`processed/`. Có thể backup riêng sau khi enrich xong (không tốn thêm API vì
+`enrich_data.py` idempotent với cache):
+
+```bash
+!python scripts/enrich_data.py \
+    --in  data/processed/enriched.jsonl \
+    --out data/processed/enriched.jsonl \
+    --no-paraphrase --no-explain --push-after
+```
+
+**Restore trên session mới (nếu đã push ở session trước):**
+
+```python
+from huggingface_hub import hf_hub_download
+from pathlib import Path
+import shutil
+from temprun.utils import load_env, repo_root
+load_env(repo_root() / ".env")
+import os
+
+REPO = os.environ["HF_DATASET_REPO"]
+TOKEN = os.environ["HF_TOKEN"]
+target = repo_root() / "data" / "processed"
+for fname in ("enriched.jsonl", "enriched.jsonl.cache.json"):
+    downloaded = Path(hf_hub_download(
+        repo_id=REPO, filename=f"processed/{fname}", repo_type="dataset", token=TOKEN,
+        local_dir=target / "_hf_cache",
+    ))
+    final = target / fname
+    if final.exists():
+        final.unlink()
+    shutil.move(str(downloaded), str(final))
+    print("restored:", final)
+```
+
+Sau khi restore, chạy `enrich_data.py` bình thường — nó sẽ đọc cache và **không
+tốn thêm API call** cho rows đã xử lý.
 
 ## BƯỚC 3 — Train QLoRA
 

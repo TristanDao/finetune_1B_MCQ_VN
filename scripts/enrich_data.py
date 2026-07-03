@@ -61,6 +61,21 @@ def main() -> int:
         default=True,
         help="Force sequential path (equivalent to --concurrency 1).",
     )
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=25,
+        help="Sync mode: print a heartbeat every N items processed per phase (default: 25).",
+    )
+    parser.add_argument(
+        "--push-after",
+        action="store_true",
+        help=(
+            "After enrichment, upload enriched.jsonl (+ cache) to "
+            "${HF_DATASET_REPO}/processed/. Requires HF_TOKEN (write scope). "
+            "Skips the cache if not present. Repo stays PRIVATE."
+        ),
+    )
     args = parser.parse_args()
 
     concurrency = args.concurrency if args.async_enabled else 1
@@ -78,11 +93,22 @@ def main() -> int:
             target_per_class=args.target_per_class,
             synth_retry=args.synth_retry,
             concurrency=concurrency,
+            progress_every=args.progress_every,
         )
     except Exception as e:
         print(f"[enrich] failed: {e}", file=sys.stderr)
         return 1
     print(f"[enrich] summary: {counters}")
+
+    if args.push_after:
+        from temprun.hf_utils import push_enriched_to_hf
+
+        try:
+            uploaded = push_enriched_to_hf(args.out)
+        except Exception as e:  # noqa: BLE001
+            print(f"[enrich] push failed: {e}", file=sys.stderr)
+            return 2
+        print(f"[enrich] pushed: {uploaded}")
     return 0
 
 

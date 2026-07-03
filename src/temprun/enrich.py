@@ -32,7 +32,20 @@ def get_client() -> OpenAI:
 
 
 def get_model() -> str:
-    return os.environ.get("DASHSCOPE_MODEL", "qwen3-max-preview")
+    return (
+        os.environ.get("DASHSCOPE_MODEL")
+        or os.environ.get("DASHSCOPE_MODEL_BACKUP")
+        or ""
+    )
+
+
+def get_model_source() -> str:
+    """Which env var supplied the model name (for logging)."""
+    if os.environ.get("DASHSCOPE_MODEL"):
+        return "DASHSCOPE_MODEL"
+    if os.environ.get("DASHSCOPE_MODEL_BACKUP"):
+        return "DASHSCOPE_MODEL_BACKUP"
+    return "unset"
 
 
 def call_chat(
@@ -433,6 +446,28 @@ def _new_counter() -> dict[str, int]:
     }
 
 
+def _log_progress(
+    phase: str,
+    done: int,
+    total: int,
+    counter: dict[str, int],
+    *,
+    every: int = 25,
+) -> None:
+    """Print a one-line heartbeat when `done` hits the heartbeat boundary
+    or when the phase finishes. Cheap when `every > total` (e.g. tiny inputs)."""
+    if done == 0:
+        return
+    if done == total or done % every == 0:
+        print(
+            f"[enrich] {phase}: {done}/{total} | "
+            f"paraphrase={counter['paraphrase']} "
+            f"explain={counter['explain']} "
+            f"synth={counter['synth']} "
+            f"errors={counter['errors']}"
+        )
+
+
 def _iter_eligible_rows(rows: Iterable[dict], counter: dict[str, int]) -> Iterable[dict]:
     """Yield rows that have all required fields and a valid label, counting
     the rest in `counter['skipped']`."""
@@ -458,20 +493,37 @@ def _run_passes_sync(
     synth_retry: int,
     synth_max: int,
     model_name: str,
+    progress_every: int = 25,
 ) -> tuple[list[dict], dict[str, int], dict[str, dict]]:
     """Sequential (concurrency=1) implementation of the two passes."""
     client = get_client()
     counter = _new_counter()
     written: list[dict] = []
 
+    # Pre-compute plan totals so we can show N/M progress without iterating twice.
+    eligible = list(_iter_eligible_rows(rows, counter))
+    paraphrase_total = sum(
+        1 + (plan["repeat_per_row"].get(r["label"], 0) if effective_balance else 0)
+        for r in eligible
+    )
+    explain_total = len(eligible) if explain else 0
+
+    if paraphrase and paraphrase_total:
+        print(f"[enrich] paraphrase: starting {paraphrase_total} jobs (sequential)")
+    if explain:
+        print(f"[enrich] explain: starting {explain_total} jobs (sequential)")
+
     # ---- Pass 1: paraphrase + explain ----
-    for r in _iter_eligible_rows(rows, counter):
+    paraphrase_done = 0
+    explain_done = 0
+    for r in eligible:
         repeat = plan["repeat_per_row"].get(r["label"], 0) if effective_balance else 0
         n_total = 1 + repeat
         for n in range(n_total):
             p_key = _paraphrase_key(r, n, effective_balance)
             entry = cache.get(p_key, {})
             if entry.get("paraphrase"):
+                paraphrase_done += 1
                 continue
             if paraphrase:
                 counter["paraphrase_attempts"] += 1
@@ -485,12 +537,21 @@ def _run_passes_sync(
                     continue
                 written.append(new_row)
                 counter["paraphrase"] += 1
+            paraphrase_done += 1
             cache[p_key] = {**entry, "paraphrase": True}
+        if paraphrase_total:
+            _log_progress(
+                "paraphrase", paraphrase_done, paraphrase_total, counter, every=progress_every
+            )
 
         if explain:
             e_key = _hash(r["question"] + "|" + r["label"])
             entry = cache.get(e_key, {})
             if entry.get("explanation"):
+                explain_done += 1
+                _log_progress(
+                    "explain", explain_done, explain_total, counter, every=progress_every
+                )
                 continue
             try:
                 msgs = explain_prompt(
@@ -506,6 +567,10 @@ def _run_passes_sync(
             except Exception as e:  # noqa: BLE001
                 counter["errors"] += 1
                 print(f"[enrich] explain {e_key[:8]} failed: {e}")
+            explain_done += 1
+            _log_progress(
+                "explain", explain_done, explain_total, counter, every=progress_every
+            )
 
     # ---- Pass 2: synth ----
     if synth:
@@ -519,6 +584,10 @@ def _run_passes_sync(
             needs: dict[str, int] = {
                 lbl: n for lbl, n in plan["synth_needed"].items() if n > 0
             }
+            synth_total = sum(needs.values())
+            if synth_total:
+                print(f"[enrich] synth: starting up to {synth_total} targeted jobs (sequential)")
+            synth_done = 0
             for r in candidates:
                 if not needs:
                     break
@@ -551,11 +620,21 @@ def _run_passes_sync(
                             counter["synth"] += 1
                             needs[lbl] -= 1
                         break  # one attempt per slot, even on miss
+                    synth_done += 1
+                    _log_progress(
+                        "synth", synth_done, synth_total, counter, every=progress_every
+                    )
         else:
-            for r in candidates[:synth_max]:
+            synth_total = min(synth_max, len(candidates))
+            if synth_total:
+                print(f"[enrich] synth: starting {synth_total} jobs (sequential)")
+            for i, r in enumerate(candidates[:synth_max], start=1):
                 s_key = _hash(r["title"] + "|synth|generic")
                 entry = cache.get(s_key, {})
                 if entry.get("synth"):
+                    _log_progress(
+                        "synth", i, synth_total, counter, every=progress_every
+                    )
                     continue
                 counter["synth_attempts"] += 1
                 try:
@@ -569,6 +648,9 @@ def _run_passes_sync(
                 written.append(new_row)
                 counter["synth"] += 1
                 cache[s_key] = {**entry, "synth": True}
+                _log_progress(
+                    "synth", i, synth_total, counter, every=progress_every
+                )
 
     return written, counter, cache
 
@@ -586,6 +668,7 @@ async def _run_passes_async(
     synth_max: int,
     model_name: str,
     concurrency: int,
+    progress_every: int = 25,
 ) -> tuple[list[dict], dict[str, int], dict[str, dict]]:
     """Concurrent implementation: collects jobs in the main coroutine, then
     fires them through an `asyncio.Semaphore(concurrency)` so at most
@@ -620,8 +703,17 @@ async def _run_passes_async(
                     return ("err", n, p_key, str(e))
 
         if paraphrase and paraphrase_jobs:
+            print(
+                f"[enrich] paraphrase: starting {len(paraphrase_jobs)} jobs "
+                f"(concurrency={concurrency})"
+            )
+            t0 = time.monotonic()
             results = await asyncio.gather(
                 *(_run_paraphrase(r, n, k) for r, n, k in paraphrase_jobs)
+            )
+            print(
+                f"[enrich] paraphrase: done in {time.monotonic() - t0:.1f}s | "
+                f"counters={counter}"
             )
             for status, n, p_key, payload in results:
                 if status == "err":
@@ -655,7 +747,16 @@ async def _run_passes_async(
                     return ("err", e_key, str(e))
 
         if explain and explain_jobs:
+            print(
+                f"[enrich] explain: starting {len(explain_jobs)} jobs "
+                f"(concurrency={concurrency})"
+            )
+            t0 = time.monotonic()
             results = await asyncio.gather(*(_run_explain(r, k) for r, k in explain_jobs))
+            print(
+                f"[enrich] explain: done in {time.monotonic() - t0:.1f}s | "
+                f"counters={counter}"
+            )
             for status, e_key, payload in results:
                 if status == "err":
                     counter["errors"] += 1
@@ -677,6 +778,13 @@ async def _run_passes_async(
                 needs: dict[str, int] = {
                     lbl: n for lbl, n in plan["synth_needed"].items() if n > 0
                 }
+                synth_total = sum(needs.values())
+                if synth_total:
+                    print(
+                        f"[enrich] synth: starting up to {synth_total} targeted jobs (sequential)"
+                    )
+                synth_done = 0
+                t0 = time.monotonic()
                 for r in candidates:
                     if not needs:
                         break
@@ -709,6 +817,15 @@ async def _run_passes_async(
                                 counter["synth"] += 1
                                 needs[lbl] -= 1
                             break
+                        synth_done += 1
+                        _log_progress(
+                            "synth", synth_done, synth_total, counter, every=progress_every
+                        )
+                if synth_total:
+                    print(
+                        f"[enrich] synth: done in {time.monotonic() - t0:.1f}s | "
+                        f"counters={counter}"
+                    )
             else:
                 synth_jobs: list[tuple[dict, str]] = []
                 for r in candidates[:synth_max]:
@@ -727,8 +844,17 @@ async def _run_passes_async(
                             return ("err", s_key, str(e))
 
                 if synth_jobs:
+                    print(
+                        f"[enrich] synth: starting {len(synth_jobs)} jobs "
+                        f"(concurrency={concurrency})"
+                    )
+                    t0 = time.monotonic()
                     results = await asyncio.gather(
                         *(_run_synth(r, k) for r, k in synth_jobs)
+                    )
+                    print(
+                        f"[enrich] synth: done in {time.monotonic() - t0:.1f}s | "
+                        f"counters={counter}"
                     )
                     for status, s_key, payload in results:
                         if status == "err":
@@ -757,8 +883,18 @@ def enrich_dataset(
     target_per_class: int | None = None,
     synth_retry: int = 3,
     concurrency: int = 10,
+    progress_every: int = 25,
 ) -> dict[str, int]:
     """Enrich a SFT jsonl by adding new rows. Idempotent via content-hash cache.
+
+    Output schema (slim): each row has only `messages` (the chat-formatted
+    training text, embedding title/content/question/choices in the user
+    prompt), `label` (top-level mirror of the assistant letter), and
+    optional `_source` (`"paraphrase"` | `"synth"`). The full top-level
+    `title`/`content`/`question`/`choices`/`row_id` from the input rows
+    are dropped on write — `train.py` and `scripts/evaluate.py` only read
+    `messages` and `label`, and `infer.py` reads the test set from
+    `data/raw/test/` (never from enriched data).
 
     Args:
         balance: None → auto-enable when max/min label ratio > 2.0 (see
@@ -773,6 +909,9 @@ def enrich_dataset(
             sequential path; `>1` uses `AsyncOpenAI` + `asyncio.Semaphore`.
             If the async path raises, we automatically fall back to the
             sequential path. Defaults to 10.
+        progress_every: in sync mode, print a heartbeat every N items processed
+            per phase (paraphrase, explain, synth). Async mode logs a single
+            start/done line per phase instead.
     """
     from .data import read_jsonl
 
@@ -783,6 +922,9 @@ def enrich_dataset(
 
     rows = read_jsonl(in_path)
     print(f"[enrich] loaded {len(rows)} rows from {in_path}")
+
+    model_name = get_model()
+    print(f"[enrich] model: {model_name!r}  (source={get_model_source()})")
 
     plan = _balance_plan(rows, target_per_class=target_per_class)
     effective_balance = plan["is_imbalanced"] if balance is None else balance
@@ -798,7 +940,6 @@ def enrich_dataset(
     if cache_path.exists():
         cache = json.loads(cache_path.read_text(encoding="utf-8"))
 
-    model_name = get_model()
     use_async = concurrency and concurrency > 1
     if use_async:
         try:
@@ -815,6 +956,7 @@ def enrich_dataset(
                     synth_max=synth_max,
                     model_name=model_name,
                     concurrency=concurrency,
+                    progress_every=progress_every,
                 )
             )
         except Exception as e:  # noqa: BLE001
@@ -830,6 +972,7 @@ def enrich_dataset(
                 synth_retry=synth_retry,
                 synth_max=synth_max,
                 model_name=model_name,
+                progress_every=progress_every,
             )
     else:
         written, counter, cache = _run_passes_sync(
@@ -843,17 +986,21 @@ def enrich_dataset(
             synth_retry=synth_retry,
             synth_max=synth_max,
             model_name=model_name,
+            progress_every=progress_every,
         )
 
     # Persist cache
     cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
 
-    # Append to original
+    # Append to original (slim schema: messages + label + optional _source).
+    # `train.py` and `scripts/evaluate.py` only read `messages` (+ `label`),
+    # so we drop the redundant top-level title/content/question/choices/row_id
+    # that came from `train.jsonl`. See `_slim_row` for the schema.
     with open(out_path, "w", encoding="utf-8") as f:
         for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            f.write(json.dumps(_slim_row(r), ensure_ascii=False) + "\n")
         for r in written:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            f.write(json.dumps(_slim_row(r), ensure_ascii=False) + "\n")
 
     print(f"[enrich] done. counters={counter} out={out_path}")
     return counter
@@ -870,3 +1017,23 @@ def _user_text_from_parsed(parsed: dict, original: dict) -> str:
         question=parsed["question"],
         choices=parsed["choices"],
     )
+
+
+def _slim_row(r: dict) -> dict:
+    """Reduce a row to the minimal schema used downstream by train/eval:
+    `messages` (already embeds title/content/question/choices in the user
+    prompt), `label` (top-level mirror of `messages[-1]['content']`), and
+    optional `_source` (debug metadata: "paraphrase" | "synth").
+
+    All other fields (`title`, `content`, `question`, `choices`, `row_id`)
+    are dropped — they are not read by `train.py` or `scripts/evaluate.py`,
+    and the test set is loaded from `data/raw/test/` by `infer.py`, never
+    from enriched data.
+    """
+    slim: dict = {
+        "messages": r["messages"],
+        "label": r.get("label", ""),
+    }
+    if "_source" in r:
+        slim["_source"] = r["_source"]
+    return slim
