@@ -243,6 +243,133 @@ def test_call_chat_async_raises_after_max_retries():
     assert completions.create.await_count == 2
 
 
+# -----------------------------------------------------------------------------
+# Choice-reorder balancing (cheap, no API)
+# -----------------------------------------------------------------------------
+
+def _reorder_row(label: str, qid: int) -> dict:
+    """Build a row with deterministic choices so reorders are easy to verify."""
+    return {
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": f"q{qid}?"},
+            {"role": "assistant", "content": label},
+        ],
+        "title": f"t-{qid}",
+        "content": "body",
+        "question": f"q{qid}?",
+        "choices": {"A": "1", "B": "2", "C": "3", "D": "4"},
+        "label": label,
+        "row_id": f"art{qid}__1",
+    }
+
+
+def test_reorder_row_for_label_rotates_choices():
+    """`A` should rotate to `C` after a +2 shift: {A,B,C,D} -> {C,D,A,B}."""
+    from temprun.enrich import _reorder_row_for_label
+    row = _reorder_row("A", 1)
+    out = _reorder_row_for_label(row, "C")
+    # A→C means shift=2: old A goes to C, old B to D, old C to A, old D to B
+    assert out["choices"] == {"A": "3", "B": "4", "C": "1", "D": "2"}
+    assert out["label"] == "C"
+    # messages must be regenerated: assistant letter must match new label
+    assert out["messages"][2]["content"] == "C"
+    # The original correct text ("1") must now appear at position C in the user content
+    assert "C: 1" in out["messages"][1]["content"]
+
+
+def test_reorder_row_for_label_noop_when_already_correct():
+    from temprun.enrich import _reorder_row_for_label
+    row = _reorder_row("B", 1)
+    out = _reorder_row_for_label(row, "B")
+    # Same object identity (no rotation done)
+    assert out is row
+    assert out["choices"] == {"A": "1", "B": "2", "C": "3", "D": "4"}
+
+
+def test_reorder_row_for_label_skips_invalid_rows():
+    from temprun.enrich import _reorder_row_for_label
+    # Missing choices
+    assert _reorder_row_for_label({"label": "A", "question": "q"}, "B") == {
+        "label": "A", "question": "q",
+    }
+    # Bad label
+    bad = _reorder_row("Z", 1)
+    assert _reorder_row_for_label(bad, "A") is bad
+    # Incomplete choices
+    incomplete = {"label": "A", "choices": {"A": "1", "B": "2"}, "question": "q"}
+    assert _reorder_row_for_label(incomplete, "B") is incomplete
+
+
+def test_balance_via_reorder_distributes_labels_evenly():
+    """Highly imbalanced input (all label='A') should map to ~equal per label."""
+    from temprun.enrich import balance_via_reorder
+    rows = [_reorder_row("A", i) for i in range(40)]
+    out = balance_via_reorder(rows, seed=3407)
+    counts = {"A": 0, "B": 0, "C": 0, "D": 0}
+    for r in out:
+        counts[r["label"]] += 1
+    assert counts == {"A": 10, "B": 10, "C": 10, "D": 10}
+
+
+def test_balance_via_reorder_is_deterministic():
+    """Same seed → identical (label, row_id) sequence. Different seed →
+    different row ordering (even though the label sequence itself is the
+    fixed A,B,C,D cycle)."""
+    from temprun.enrich import balance_via_reorder
+    rows = [_reorder_row("A", i) for i in range(20)] + [_reorder_row("B", i) for i in range(20)]
+    out1 = balance_via_reorder(rows, seed=42)
+    out2 = balance_via_reorder(rows, seed=42)
+    pairs1 = [(r["label"], r["row_id"]) for r in out1]
+    pairs2 = [(r["label"], r["row_id"]) for r in out2]
+    assert pairs1 == pairs2, "same seed should give identical (label, row_id) order"
+    out3 = balance_via_reorder(rows, seed=99)
+    pairs3 = [(r["label"], r["row_id"]) for r in out3]
+    assert pairs1 != pairs3, "different seed should give a different row ordering"
+
+
+def test_balance_via_reorder_preserves_correct_text():
+    """For every row, the text at the new label position must equal the text
+    that was at the original label position in the input row."""
+    from temprun.enrich import balance_via_reorder
+    rows = [_reorder_row("B", i) for i in range(8)]
+    out = balance_via_reorder(rows, seed=3407)
+    # Build a map: row_id -> (input_correct_text, new_label)
+    by_id = {r["row_id"]: r for r in rows}
+    for r in out:
+        orig = by_id[r["row_id"]]
+        # Original correct text (at orig["label"]) must equal new choices[r["label"]]
+        orig_text = orig["choices"][orig["label"]]
+        assert r["choices"][r["label"]] == orig_text
+
+
+def test_balance_via_reorder_keeps_total_row_count():
+    from temprun.enrich import balance_via_reorder
+    rows = [_reorder_row("A", i) if i % 2 == 0 else _reorder_row("B", i) for i in range(33)]
+    out = balance_via_reorder(rows, seed=1)
+    assert len(out) == len(rows)
+
+
+def test_balance_via_reorder_with_4041_imbalanced_rows_yields_ratio_1():
+    """Mirrors the real dataset shape (4041 rows, A=1257, B=1638, C=1002, D=144)
+    and checks the resulting ratio is essentially 1.0."""
+    from temprun.enrich import balance_via_reorder
+    rows = (
+        [_reorder_row("A", i) for i in range(1257)]
+        + [_reorder_row("B", i) for i in range(1638)]
+        + [_reorder_row("C", i) for i in range(1002)]
+        + [_reorder_row("D", i) for i in range(144)]
+    )
+    out = balance_via_reorder(rows, seed=3407)
+    counts = {"A": 0, "B": 0, "C": 0, "D": 0}
+    for r in out:
+        counts[r["label"]] += 1
+    # ~1010 per label (off by at most 1)
+    assert counts == {"A": 1011, "B": 1010, "C": 1010, "D": 1010}
+    ratio = max(counts.values()) / min(counts.values())
+    assert ratio < 1.01, f"ratio {ratio} should be ~1.0"
+
+
 def test_paraphrase_once_async_returns_row_on_valid_json():
     client = MagicMock()
     completions = MagicMock()

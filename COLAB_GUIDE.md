@@ -131,20 +131,56 @@ load_env(repo_root() / ".env")
 !python scripts/make_sft_jsonl.py --in data/raw/train --out data/processed
 ```
 
-## BƯỚC 2 — Enrich (optional)
+## BƯỚC 2 — Balance + (optional) Enrich
 
-Skip this if you don't want to use the Qwen3 API. Falls back to the 4,491 raw
-training examples, which is enough for a first pass.
+**TL;DR**: Bước này gồm 2 phần:
+1. **Cân bằng label A/B/C/D** (BẮT BUỘC để model không bias): script tự động
+   rotate choices. **Không tốn API**, chạy trong vài giây. Đây là bước đầu tiên
+   và thường đủ để train model tốt.
+2. **Paraphrase + Explain** (TUỲ CHỌN, tốn API DashScope): chỉ làm khi train
+   thử mà accuracy chưa đủ tốt.
+
+### 2.1 — Balance (reorder) — recommended, no API
+
+Bước này xoay `choices` sao cho label A/B/C/D phân bố đều (~25% mỗi label).
+Không gọi API, chạy trong vài giây, không cần `DASHSCOPE_API_KEY`.
 
 ```python
 %cd /content/finetune_1B_MCQ_VN
 from temprun.utils import load_env, repo_root
 load_env(repo_root() / ".env")
-import os
-assert os.environ.get("DASHSCOPE_API_KEY"), "DASHSCOPE_API_KEY missing"
 ```
 
+```bash
+# 2.1: Reorder choices cho cân bằng (KHÔNG tốn API, chạy ~1 giây)
+!python scripts/enrich_data.py \
+    --in  data/processed/train.jsonl \
+    --out data/processed/enriched.jsonl \
+    --no-paraphrase --no-explain
+```
+
+Output sẽ có dạng:
+```
+[enrich] loaded 4041 rows from data/processed/train.jsonl
+[enrich] model: 'qwen3.6-max-preview'  (source=DASHSCOPE_MODEL)
+[enrich] balance via reorder: {'A': 1257, 'B': 1638, 'C': 1002, 'D': 144} → {'A': 1011, 'B': 1010, 'C': 1010, 'D': 1010}
+[enrich] done. counters={...} out=data/processed/enriched.jsonl
+```
+
+→ Cân bằng xong. Sang **BƯỚC 3** (train) luôn. Quay lại 2.2 chỉ khi cần.
+
+### 2.2 — Paraphrase + Explain (optional, costs API)
+
+**Chỉ làm khi**: BƯỚC 5 (evaluate) cho accuracy thấp, model under-fit, hoặc
+cần thêm data đa dạng. Cần `DASHSCOPE_API_KEY` trong `.env`.
+
+**Chi phí ước tính** (qwen3.6-max-preview, ~6s/call, 1M token free):
+- Paraphrase 1x/row: 4041 calls × 6s = ~6.7h
+- Explain 1x/row: thêm ~6.7h
+- Tổng: ~13h với cả 2 phase. Có thể chạy 1 trong 2 để tiết kiệm.
+
 ```python
+# Smoke test API (1 call, bỏ qua nếu đã test ở Bước 0.7)
 from temprun.enrich import call_chat, get_client, get_model
 out = call_chat(get_client(),
     [{"role": "system", "content": "Bạn là trợ lý."},
@@ -154,19 +190,26 @@ print(out)
 ```
 
 ```bash
+# 2.2: Chạy paraphrase + explain (tốn API)
 # Script sẽ in: model đang dùng + heartbeat progress mỗi 25 hàng (sync)
 # hoặc 'starting/done' lines mỗi phase (async). Đổi tần suất bằng --progress-every N.
-# Thêm --push-after để backup enriched + cache lên HF sau khi xong
-# (tránh mất tiền API khi Colab reset). Cần HF_TOKEN write scope trong .env.
+# Thêm --push-after để backup lên HF (xem 2.4 bên dưới).
 !python scripts/enrich_data.py \
-    --in  data/processed/train.jsonl \
+    --in  data/processed/enriched.jsonl \
     --out data/processed/enriched.jsonl
+```
+
+### 2.3 — Merge: train + eval split
+
+```bash
+# Gộp enriched vào final/{train,eval}.jsonl (90/10 split)
 !python scripts/merge_enriched.py
 ```
 
-**Backup lên HF (khuyến nghị khi chạy Colab):** file `enriched.jsonl` + cache API
-response sẽ được push lên cùng repo `${HF_DATASET_REPO}` vào sub-folder
-`processed/`. Có thể backup riêng sau khi enrich xong (không tốn thêm API vì
+### 2.4 — Backup lên HF (khuyến nghị khi dùng API)
+
+Đẩy `enriched.jsonl` + cache API response lên cùng repo `${HF_DATASET_REPO}`
+vào sub-folder `processed/`. Backup riêng sau khi chạy (không tốn thêm API vì
 `enrich_data.py` idempotent với cache):
 
 ```bash

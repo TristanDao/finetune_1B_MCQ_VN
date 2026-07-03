@@ -301,6 +301,96 @@ def _balance_plan(
 
 
 # -----------------------------------------------------------------------------
+# Cheap class balancing: rotate choices so the correct answer position is
+# distributed evenly across A/B/C/D. Replaces the expensive
+# paraphrase-repeats-for-minority-classes strategy. No API calls, deterministic
+# given `seed`, runs in O(N) on the input rows.
+# -----------------------------------------------------------------------------
+
+def _reorder_row_for_label(row: dict, target_label: str) -> dict:
+    """Rotate `row['choices']` so the original correct answer lands on
+    `target_label`. Regenerates `row['messages']` to reflect the new ordering.
+
+    No-op (returns the input unchanged) when:
+      - either label is not in {A, B, C, D}
+      - the row is missing a complete {A, B, C, D} choice set
+      - `target_label == row['label']` (no rotation needed)
+    """
+    orig_label = row.get("label", "")
+    if orig_label not in VALID_LABELS or target_label not in VALID_LABELS:
+        return row
+    choices = row.get("choices") or {}
+    if not all(k in choices for k in ("A", "B", "C", "D")):
+        return row
+
+    shift = (ord(target_label) - ord(orig_label)) % 4
+    if shift == 0:
+        return row
+
+    new_choices: dict[str, str] = {}
+    for k, v in choices.items():
+        if k in VALID_LABELS:
+            new_choices[chr(ord("A") + (ord(k) - ord("A") + shift) % 4)] = v
+        else:
+            new_choices[k] = v  # preserve any extra keys
+
+    # Regenerate the chat user content with the new choice order, keeping
+    # the same system prompt.
+    from .prompts import (
+        DEFAULT_SYSTEM_PROMPT,
+        build_chat_messages,
+        build_user_instruction,
+    )
+
+    new_user = build_user_instruction(
+        title=row.get("title", ""),
+        content=row.get("content", ""),
+        question=row.get("question", ""),
+        choices=new_choices,
+    )
+    new_msgs = build_chat_messages(
+        system_prompt=DEFAULT_SYSTEM_PROMPT,
+        user_instruction=new_user,
+        assistant=target_label,
+    )
+
+    new_row = dict(row)
+    new_row["messages"] = new_msgs
+    new_row["choices"] = new_choices
+    new_row["label"] = target_label
+    return new_row
+
+
+def balance_via_reorder(rows: list[dict], *, seed: int = 3407) -> list[dict]:
+    """Rebalance the label distribution by rotating each row's choices so the
+    correct answer position cycles A→B→C→D across the dataset.
+
+    Args:
+        rows: input rows. Each must have `choices` ({A,B,C,D}-keyed) and
+            `label` ∈ {A,B,C,D}; rows that don't are passed through unchanged
+            by `_reorder_row_for_label`.
+        seed: RNG seed for the row-shuffle so the resulting label distribution
+            has no positional pattern. Default 3407 (matches the rest of the
+            project).
+
+    Returns:
+        A NEW list of rows. The input is not mutated.
+
+    Resulting distribution is ~ceil(N/4) per label (off by at most 1), so
+    `ratio ≈ 1.00`. This is the cheap, default balancing strategy; paraphrase
+    repeats for minority classes are no longer needed.
+    """
+    rng = random.Random(seed)
+    indices = list(range(len(rows)))
+    rng.shuffle(indices)
+    target_labels = ["A", "B", "C", "D"]
+    return [
+        _reorder_row_for_label(rows[i], target_labels[new_idx % 4])
+        for new_idx, i in enumerate(indices)
+    ]
+
+
+# -----------------------------------------------------------------------------
 # Per-call helpers (sync + async mirrors)
 # -----------------------------------------------------------------------------
 
@@ -986,6 +1076,20 @@ def enrich_dataset(
 
     model_name = get_model()
     print(f"[enrich] model: {model_name!r}  (source={get_model_source()})")
+
+    # Cheap class balancing: rotate choices so the correct answer position
+    # cycles A→B→C→D across the dataset. Replaces the expensive
+    # paraphrase-repeats-for-minority-classes strategy. No API calls. Skip
+    # with `--no-balance` if you want to keep the original label distribution.
+    if balance is not False:
+        from .data import label_distribution
+        pre_dist = label_distribution(rows)
+        rows = balance_via_reorder(rows, seed=seed)
+        post_dist = label_distribution(rows)
+        print(
+            f"[enrich] balance via reorder: {pre_dist} → {post_dist} "
+            f"(seed={seed}, algorithm=choice-rotate)"
+        )
 
     plan = _balance_plan(rows, target_per_class=target_per_class)
     effective_balance = plan["is_imbalanced"] if balance is None else balance
