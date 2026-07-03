@@ -703,28 +703,36 @@ async def _run_passes_async(
                     return ("err", n, p_key, str(e))
 
         if paraphrase and paraphrase_jobs:
+            total = len(paraphrase_jobs)
             print(
-                f"[enrich] paraphrase: starting {len(paraphrase_jobs)} jobs "
+                f"[enrich] paraphrase: starting {total} jobs "
                 f"(concurrency={concurrency})"
             )
             t0 = time.monotonic()
-            results = await asyncio.gather(
-                *(_run_paraphrase(r, n, k) for r, n, k in paraphrase_jobs)
-            )
-            print(
-                f"[enrich] paraphrase: done in {time.monotonic() - t0:.1f}s | "
-                f"counters={counter}"
-            )
-            for status, n, p_key, payload in results:
+            coros = [_run_paraphrase(r, n, k) for r, n, k in paraphrase_jobs]
+            done_count = 0
+            for fut in asyncio.as_completed(coros):
+                status, n, p_key, payload = await fut
+                done_count += 1
                 if status == "err":
                     counter["errors"] += 1
                     print(f"[enrich] paraphrase {p_key[:8]}/n={n} failed: {payload}")
+                    _log_progress(
+                        "paraphrase", done_count, total, counter, every=progress_every
+                    )
                     continue
                 cache[p_key] = {**cache.get(p_key, {}), "paraphrase": True}
                 new_row = payload
                 if new_row is not None:
                     written.append(new_row)
                     counter["paraphrase"] += 1
+                _log_progress(
+                    "paraphrase", done_count, total, counter, every=progress_every
+                )
+            print(
+                f"[enrich] paraphrase: done in {time.monotonic() - t0:.1f}s | "
+                f"counters={counter}"
+            )
         else:
             for _, _, p_key in paraphrase_jobs:
                 cache[p_key] = {**cache.get(p_key, {}), "paraphrase": True}
@@ -747,25 +755,35 @@ async def _run_passes_async(
                     return ("err", e_key, str(e))
 
         if explain and explain_jobs:
+            total = len(explain_jobs)
             print(
-                f"[enrich] explain: starting {len(explain_jobs)} jobs "
+                f"[enrich] explain: starting {total} jobs "
                 f"(concurrency={concurrency})"
             )
             t0 = time.monotonic()
-            results = await asyncio.gather(*(_run_explain(r, k) for r, k in explain_jobs))
-            print(
-                f"[enrich] explain: done in {time.monotonic() - t0:.1f}s | "
-                f"counters={counter}"
-            )
-            for status, e_key, payload in results:
+            coros = [_run_explain(r, k) for r, k in explain_jobs]
+            done_count = 0
+            for fut in asyncio.as_completed(coros):
+                status, e_key, payload = await fut
+                done_count += 1
                 if status == "err":
                     counter["errors"] += 1
                     print(f"[enrich] explain {e_key[:8]} failed: {payload}")
+                    _log_progress(
+                        "explain", done_count, total, counter, every=progress_every
+                    )
                     continue
                 explanation = payload
                 if explanation is not None:
                     counter["explain"] += 1
                     cache[e_key] = {**cache.get(e_key, {}), "explanation": explanation}
+                _log_progress(
+                    "explain", done_count, total, counter, every=progress_every
+                )
+            print(
+                f"[enrich] explain: done in {time.monotonic() - t0:.1f}s | "
+                f"counters={counter}"
+            )
 
         # ---- Pass 2: synth ----
         if synth:
@@ -844,28 +862,36 @@ async def _run_passes_async(
                             return ("err", s_key, str(e))
 
                 if synth_jobs:
+                    total = len(synth_jobs)
                     print(
-                        f"[enrich] synth: starting {len(synth_jobs)} jobs "
+                        f"[enrich] synth: starting {total} jobs "
                         f"(concurrency={concurrency})"
                     )
                     t0 = time.monotonic()
-                    results = await asyncio.gather(
-                        *(_run_synth(r, k) for r, k in synth_jobs)
-                    )
-                    print(
-                        f"[enrich] synth: done in {time.monotonic() - t0:.1f}s | "
-                        f"counters={counter}"
-                    )
-                    for status, s_key, payload in results:
+                    coros = [_run_synth(r, k) for r, k in synth_jobs]
+                    done_count = 0
+                    for fut in asyncio.as_completed(coros):
+                        status, s_key, payload = await fut
+                        done_count += 1
                         if status == "err":
                             counter["errors"] += 1
                             print(f"[enrich] synth failed: {payload}")
+                            _log_progress(
+                                "synth", done_count, total, counter, every=progress_every
+                            )
                             continue
                         cache[s_key] = {**cache.get(s_key, {}), "synth": True}
                         new_row = payload
                         if new_row is not None:
                             written.append(new_row)
                             counter["synth"] += 1
+                        _log_progress(
+                            "synth", done_count, total, counter, every=progress_every
+                        )
+                    print(
+                        f"[enrich] synth: done in {time.monotonic() - t0:.1f}s | "
+                        f"counters={counter}"
+                    )
 
     return written, counter, cache
 
