@@ -70,6 +70,23 @@ else:
 > đúng cách với `src` layout. Thêm `sys.path.insert` vào **mọi cell** có
 > `from temprun...` (xem các block bên dưới).
 
+**Block 0.3b — Flash Attention (optional, A100/Ampere+)**
+
+Flash Attention 2 tăng tốc 2-4x trên A100. Cần compile (~10-15 phút):
+```python
+!pip install -q flash-attn --no-build-isolation
+```
+
+Sau khi cài, sửa `attn_implementation` trong config YAML:
+```yaml
+# configs/qlora_qwen3_0_6b.yaml hoặc base.yaml
+attn_implementation: flash_attention_2
+```
+
+> **Lưu ý**: Flash Attention + packing vẫn an toàn (không cross-contamination).
+> Attention mask ngăn token giữa các samples được tôn trọng bởi cả eager/sdpa/flash.
+> Với model 0.6B + seq 2048, tốc độ tăng không nhiều. Đáng bật với model >1B hoặc seq >4096.
+
 **Block 0.4 — Write `.env`** (fill the values, then run)
 ```python
 %%writefile .env
@@ -266,6 +283,10 @@ tốn thêm API call** cho rows đã xử lý.
 ## BƯỚC 3 — Train QLoRA
 
 **Notebook**: `notebooks/03_train_qlora.ipynb`
+
+```python
+!pip install -q flash-attn --no-build-isolation
+```
 
 ```python
 %cd /content/finetune_1B_MCQ_VN

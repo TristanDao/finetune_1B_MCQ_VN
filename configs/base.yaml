@@ -15,5 +15,9 @@ tokenizer:
   use_fast: true
   trust_remote_code: true
 
+# Attention implementation: "eager" (mặc định, luôn chạy), "sdpa" (PyTorch native),
+# hoặc "flash_attention_2" (cần pip install flash-attn, nhanh hơn 2-4x trên A100)
+attn_implementation: flash_attention_2
+
 # System prompt (cố định, dùng cả train và eval)
 system_prompt: "Bạn là hệ thống trả lời trắc nghiệm. Chỉ xuất duy nhất 1 ký tự A/B/C/D."

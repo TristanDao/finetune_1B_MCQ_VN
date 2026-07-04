@@ -42,22 +42,24 @@ def main(args=None) -> int:
     load_env()
     system_prompt = parsed.system_prompt or _load_default_system_prompt()
 
-    # Determine base model
+    # Determine base model (only needed for LoRA adapters)
     base_model = parsed.base_model
     if not base_model:
         train_cfg_path = Path(parsed.checkpoint) / "train_config.json"
         if train_cfg_path.exists():
             cfg = json.loads(train_cfg_path.read_text(encoding="utf-8"))
             base_model = cfg.get("model_name")
-    if not base_model:
-        raise RuntimeError("Could not determine base model. Pass --base-model.")
 
-    # Detect LoRA adapter
+    # Detect LoRA adapter vs standalone (merged) model
     adapter = None
     if (Path(parsed.checkpoint) / "adapter_config.json").exists():
         adapter = parsed.checkpoint
+        if not base_model:
+            raise RuntimeError("LoRA adapter found but no base model. Pass --base-model.")
+    else:
+        base_model = parsed.checkpoint
 
-    print(f"[eval] base={base_model} adapter={adapter or '(merged)'}")
+    print(f"[eval] base={base_model} adapter={adapter or '(none - standalone model)'}")
     model, tokenizer = load_model_for_inference(base_model, adapter, use_4bit=parsed.use_4bit)
 
     rows = read_jsonl(parsed.eval_jsonl)

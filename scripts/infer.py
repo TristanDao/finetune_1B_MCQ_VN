@@ -44,14 +44,16 @@ def main(args=None) -> int:
         if train_cfg_path.exists():
             cfg = json.loads(train_cfg_path.read_text(encoding="utf-8"))
             base_model = cfg.get("model_name")
-    if not base_model:
-        raise RuntimeError("Could not determine base model. Pass --base-model.")
 
     adapter = None
     if (Path(parsed.checkpoint) / "adapter_config.json").exists():
         adapter = parsed.checkpoint
+        if not base_model:
+            raise RuntimeError("LoRA adapter found but no base model. Pass --base-model.")
+    else:
+        base_model = parsed.checkpoint
 
-    print(f"[infer] base={base_model} adapter={adapter or '(merged)'} test_dir={parsed.test_dir}")
+    print(f"[infer] base={base_model} adapter={adapter or '(none - standalone model)'} test_dir={parsed.test_dir}")
     model, tokenizer = load_model_for_inference(base_model, adapter, use_4bit=parsed.use_4bit)
 
     items = iter_test_items(parsed.test_dir)

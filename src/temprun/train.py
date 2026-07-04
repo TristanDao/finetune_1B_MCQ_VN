@@ -56,14 +56,14 @@ def load_tokenizer(model_name: str, tok_cfg: dict):
     return tokenizer
 
 
-def load_model(model_name: str, quant: dict | None, bf16: bool):
+def load_model(model_name: str, quant: dict | None, bf16: bool, attn_impl: str = "eager"):
     bnb_config = _make_bnb_config(quant)
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         quantization_config=bnb_config,
         device_map="auto",
         torch_dtype=torch.bfloat16 if bf16 else torch.float16,
-        attn_implementation="eager",  # Colab-safe
+        attn_implementation=attn_impl,
         trust_remote_code=True,
     )
     if bnb_config is not None:
@@ -116,16 +116,28 @@ def train(
     lora_cfg = cfg.get("lora")
     bf16 = bool(train_cfg.get("bf16", torch.cuda.is_bf16_supported()))
     fp16 = bool(train_cfg.get("fp16", not bf16))
+    attn_impl = cfg.get("attn_implementation", "eager")
 
-    print(f"[train] model={model_name} run={run_name} bf16={bf16} quant={'4bit' if quant_cfg else 'none'} lora={'yes' if lora_cfg else 'no'}")
+    print(f"[train] model={model_name} run={run_name} bf16={bf16} quant={'4bit' if quant_cfg else 'none'} lora={'yes' if lora_cfg else 'no'} attn={attn_impl}")
 
     tokenizer = load_tokenizer(model_name, tok_cfg)
-    model = load_model(model_name, quant_cfg, bf16=bf16)
+    model = load_model(model_name, quant_cfg, bf16=bf16, attn_impl=attn_impl)
     model = attach_lora(model, lora_cfg)
 
     # Load JSONL → HF Dataset with `text` field (chat-rendered, EOS-terminated)
     train_rows = read_jsonl(data_cfg["train_jsonl"])
     eval_rows = read_jsonl(data_cfg["eval_jsonl"])
+
+    if not train_rows:
+        raise FileNotFoundError(
+            f"Train JSONL rỗng hoặc không tồn tại: {data_cfg['train_jsonl']}\n"
+            "Hãy chạy BƯỚC 1 (download_data + make_sft_jsonl) và BƯỚC 2.3 (merge_enriched) trước."
+        )
+    if not eval_rows:
+        raise FileNotFoundError(
+            f"Eval JSONL rỗng hoặc không tồn tại: {data_cfg['eval_jsonl']}\n"
+            "Hãy chạy BƯỚC 1 (download_data + make_sft_jsonl) và BƯỚC 2.3 (merge_enriched) trước."
+        )
 
     def _render(row):
         return {"text": to_chat_text(tokenizer, row["messages"])}
