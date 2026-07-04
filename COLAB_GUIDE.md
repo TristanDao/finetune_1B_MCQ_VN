@@ -66,6 +66,10 @@ else:
 !pip install -q -r requirements-dev.txt
 ```
 
+> **Lưu ý**: Colab kernel đôi khi không nhận editable install (`pip install -e .`)
+> đúng cách với `src` layout. Thêm `sys.path.insert` vào **mọi cell** có
+> `from temprun...` (xem các block bên dưới).
+
 **Block 0.4 — Write `.env`** (fill the values, then run)
 ```python
 %%writefile .env
@@ -81,6 +85,8 @@ DRIVE_ROOT=/content/drive/MyDrive/temprun_runs
 
 **Block 0.5 — Verify `.env`**
 ```python
+import sys, os
+sys.path.insert(0, os.path.join(os.getcwd(), 'src'))
 from temprun.utils import load_env, repo_root
 load_env(repo_root() / ".env")
 import os
@@ -102,6 +108,8 @@ print(f"DRIVE_ROOT = {DRIVE_ROOT}")
 
 **Block 0.7 — Smoke test**
 ```python
+import sys, os
+sys.path.insert(0, os.path.join(os.getcwd(), 'src'))
 from temprun.data import build_rows, stratified_split
 from temprun.prompts import build_user_instruction
 from temprun.utils import parse_generated, set_seed
@@ -114,6 +122,8 @@ print("All imports OK")
 
 ```python
 %cd /content/finetune_1B_MCQ_VN
+import sys, os
+sys.path.insert(0, os.path.join(os.getcwd(), 'src'))
 from temprun.utils import load_env, repo_root
 load_env(repo_root() / ".env")
 ```
@@ -147,6 +157,8 @@ Không gọi API, chạy trong vài giây, không cần `DASHSCOPE_API_KEY`.
 
 ```python
 %cd /content/finetune_1B_MCQ_VN
+import sys, os
+sys.path.insert(0, os.path.join(os.getcwd(), 'src'))
 from temprun.utils import load_env, repo_root
 load_env(repo_root() / ".env")
 ```
@@ -181,6 +193,8 @@ cần thêm data đa dạng. Cần `DASHSCOPE_API_KEY` trong `.env`.
 
 ```python
 # Smoke test API (1 call, bỏ qua nếu đã test ở Bước 0.7)
+import sys, os
+sys.path.insert(0, os.path.join(os.getcwd(), 'src'))
 from temprun.enrich import call_chat, get_client, get_model
 out = call_chat(get_client(),
     [{"role": "system", "content": "Bạn là trợ lý."},
@@ -225,6 +239,8 @@ vào sub-folder `processed/`. Backup riêng sau khi chạy (không tốn thêm A
 from huggingface_hub import hf_hub_download
 from pathlib import Path
 import shutil
+import sys, os
+sys.path.insert(0, os.path.join(os.getcwd(), 'src'))
 from temprun.utils import load_env, repo_root
 load_env(repo_root() / ".env")
 import os
@@ -253,6 +269,8 @@ tốn thêm API call** cho rows đã xử lý.
 
 ```python
 %cd /content/finetune_1B_MCQ_VN
+import sys, os
+sys.path.insert(0, os.path.join(os.getcwd(), 'src'))
 from temprun.utils import load_env, repo_root
 load_env(repo_root() / ".env")
 import torch
@@ -282,6 +300,8 @@ if os.path.isdir("/content/drive/MyDrive"):
 
 ```python
 %cd /content/finetune_1B_MCQ_VN
+import sys, os
+sys.path.insert(0, os.path.join(os.getcwd(), 'src'))
 from temprun.utils import load_env, repo_root
 load_env(repo_root() / ".env")
 import torch
@@ -359,10 +379,15 @@ RUN  = "qlora_qwen3_0_6b"
 ```
 
 ```python
-import os
-from huggingface_hub import HfApi, create_repo
+%cd /content/finetune_1B_MCQ_VN
+import sys, os
+sys.path.insert(0, os.path.join(os.getcwd(), 'src'))
 from temprun.utils import load_env, repo_root
 load_env(repo_root() / ".env")
+import os
+from huggingface_hub import HfApi, create_repo
+assert os.environ.get("HF_TOKEN"), "HF_TOKEN missing"
+assert os.environ.get("HF_REPO"), "HF_REPO missing"
 
 REPO = os.environ["HF_REPO"]
 api = HfApi(token=os.environ["HF_TOKEN"])
