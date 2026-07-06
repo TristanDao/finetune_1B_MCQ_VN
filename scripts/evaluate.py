@@ -44,11 +44,29 @@ def main(args=None) -> int:
 
     # Determine base model (only needed for LoRA adapters)
     base_model = parsed.base_model
+    train_cfg_dict: dict = {}
     if not base_model:
         train_cfg_path = Path(parsed.checkpoint) / "train_config.json"
         if train_cfg_path.exists():
-            cfg = json.loads(train_cfg_path.read_text(encoding="utf-8"))
-            base_model = cfg.get("model_name")
+            train_cfg_dict = json.loads(train_cfg_path.read_text(encoding="utf-8"))
+            base_model = train_cfg_dict.get("model_name")
+
+    # If checkpoint doesn't have train_config.json yet, try parent (Unsloth saves under adapter/)
+    if not base_model and not train_cfg_dict:
+        parent_cfg = Path(parsed.checkpoint).parent / "train_config.json"
+        if parent_cfg.exists():
+            train_cfg_dict = json.loads(parent_cfg.read_text(encoding="utf-8"))
+            base_model = train_cfg_dict.get("model_name")
+
+    # chat_template_kwargs from train config (enable_thinking=False for Qwen3)
+    chat_kwargs = train_cfg_dict.get("chat_template_kwargs") or {}
+    if not chat_kwargs:
+        # Fall back to base.yaml
+        try:
+            base_cfg = load_config(repo_root() / "configs" / "base.yaml")
+            chat_kwargs = base_cfg.get("chat_template_kwargs") or {}
+        except Exception:  # noqa: BLE001
+            chat_kwargs = {}
 
     # Detect LoRA adapter vs standalone (merged) model
     adapter = None
@@ -59,7 +77,7 @@ def main(args=None) -> int:
     else:
         base_model = parsed.checkpoint
 
-    print(f"[eval] base={base_model} adapter={adapter or '(none - standalone model)'}")
+    print(f"[eval] base={base_model} adapter={adapter or '(none - standalone model)'} chat_kwargs={chat_kwargs}")
     model, tokenizer = load_model_for_inference(base_model, adapter, use_4bit=parsed.use_4bit)
 
     rows = read_jsonl(parsed.eval_jsonl)
@@ -81,6 +99,7 @@ def main(args=None) -> int:
         max_length=parsed.max_length,
         mode=parsed.mode,
         out_jsonl=out_jsonl,
+        chat_kwargs=chat_kwargs,
     )
     summary_path = Path(out_jsonl).with_suffix(".summary.json")
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -1,7 +1,12 @@
 """Training entry: QLoRA 4-bit + SFT, or full FT bf16 + SFT.
 
-Uses TRL's SFTTrainer with `assistant_only_loss=True` so loss is computed only
-on the assistant's single-letter response (not the system/user prompt).
+Supports two backends via `cfg["backend"]`:
+- "trl" (default): HF transformers + TRL SFTTrainer.
+- "unsloth": Unsloth FastLanguageModel (Triton kernels, ~2x faster, FA2 built-in).
+
+Uses `completion_only_loss=True` so loss is computed only on the assistant's
+single-letter response (not the system/user prompt). Chat template is rendered
+with `enable_thinking=False` (Qwen3) to match between train and infer.
 """
 from __future__ import annotations
 
@@ -20,7 +25,7 @@ from transformers import (
 from trl import SFTConfig, SFTTrainer
 
 from .data import read_jsonl
-from .utils import ensure_dir, set_seed
+from .utils import ensure_dir, render_chat_for_training, set_seed
 
 
 def _make_bnb_config(quant: dict | None) -> BitsAndBytesConfig | None:
@@ -86,12 +91,52 @@ def attach_lora(model, lora_cfg: dict | None):
     return model
 
 
-def to_chat_text(tokenizer, messages: list[dict]) -> str:
-    """Render messages as one string with chat template, ensuring EOS."""
-    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-    if not text.endswith(tokenizer.eos_token or ""):
-        text += tokenizer.eos_token or ""
-    return text
+def to_chat_text(tokenizer, messages: list[dict], chat_kwargs: dict | None = None) -> str:
+    """Render messages as one string with chat template, ensuring EOS.
+
+    Uses `render_chat_for_training` so the assistant turn is rendered with
+    `add_generation_prompt=True` + `enable_thinking=False` (when chat_kwargs
+    has it), matching the inference-time prefix exactly.
+    """
+    return render_chat_for_training(tokenizer, messages, kwargs=chat_kwargs)
+
+
+def _load_unsloth_model(model_name: str, max_seq_length: int, load_in_4bit: bool, dtype: str = "bf16"):
+    """Load model + tokenizer via Unsloth FastLanguageModel.
+
+    Returns (model, tokenizer). Unsloth handles FA2 + Triton kernels internally.
+    """
+    from unsloth import FastLanguageModel  # type: ignore[import-not-found]
+
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=model_name,
+        max_seq_length=max_seq_length,
+        dtype=None if dtype == "auto" else dtype,
+        load_in_4bit=load_in_4bit,
+    )
+    return model, tokenizer
+
+
+def _attach_unsloth_lora(model, lora_cfg: dict | None, max_seq_length: int = 2048):
+    """Attach LoRA via Unsloth's get_peft_model (uses Triton-backed LoRA)."""
+    if not lora_cfg:
+        return model
+    from unsloth import FastLanguageModel  # type: ignore[import-not-found]
+
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=int(lora_cfg["r"]),
+        target_modules=list(lora_cfg["target_modules"]),
+        lora_alpha=int(lora_cfg["alpha"]),
+        lora_dropout=float(lora_cfg.get("dropout", 0.05)),
+        bias="none" if lora_cfg.get("bias", "none") == "none" else lora_cfg["bias"],
+        use_gradient_checkpointing="unsloth",
+        random_state=42,
+        max_seq_length=max_seq_length,
+        loftq_config=None,
+    )
+    model.print_trainable_parameters()
+    return model
 
 
 def train(
@@ -117,12 +162,26 @@ def train(
     bf16 = bool(train_cfg.get("bf16", torch.cuda.is_bf16_supported()))
     fp16 = bool(train_cfg.get("fp16", not bf16))
     attn_impl = cfg.get("attn_implementation", "eager")
+    backend = cfg.get("backend", "trl")
+    chat_kwargs = cfg.get("chat_template_kwargs") or {}
+    max_seq = int(data_cfg.get("max_seq_length", 2048))
 
-    print(f"[train] model={model_name} run={run_name} bf16={bf16} quant={'4bit' if quant_cfg else 'none'} lora={'yes' if lora_cfg else 'no'} attn={attn_impl}")
+    print(
+        f"[train] model={model_name} run={run_name} backend={backend} "
+        f"bf16={bf16} quant={'4bit' if quant_cfg else 'none'} "
+        f"lora={'yes' if lora_cfg else 'no'} attn={attn_impl} "
+        f"chat_kwargs={chat_kwargs}"
+    )
 
-    tokenizer = load_tokenizer(model_name, tok_cfg)
-    model = load_model(model_name, quant_cfg, bf16=bf16, attn_impl=attn_impl)
-    model = attach_lora(model, lora_cfg)
+    if backend == "unsloth":
+        load_in_4bit = bool(quant_cfg and quant_cfg.get("load_in_4bit", True))
+        dtype = "bf16" if bf16 else ("fp16" if fp16 else "auto")
+        model, tokenizer = _load_unsloth_model(model_name, max_seq, load_in_4bit, dtype=dtype)
+        model = _attach_unsloth_lora(model, lora_cfg, max_seq_length=max_seq)
+    else:
+        tokenizer = load_tokenizer(model_name, tok_cfg)
+        model = load_model(model_name, quant_cfg, bf16=bf16, attn_impl=attn_impl)
+        model = attach_lora(model, lora_cfg)
 
     # Load JSONL → HF Dataset with `text` field (chat-rendered, EOS-terminated)
     train_rows = read_jsonl(data_cfg["train_jsonl"])
@@ -140,7 +199,7 @@ def train(
         )
 
     def _render(row):
-        return {"text": to_chat_text(tokenizer, row["messages"])}
+        return {"text": to_chat_text(tokenizer, row["messages"], chat_kwargs=chat_kwargs)}
 
     train_ds = Dataset.from_list(train_rows).map(_render, remove_columns=list(train_rows[0].keys()))
     eval_ds = Dataset.from_list(eval_rows).map(_render, remove_columns=list(eval_rows[0].keys()))
@@ -188,12 +247,29 @@ def train(
         processing_class=tokenizer,
     )
     trainer.train()
-    trainer.save_model(str(output_dir))
-    tokenizer.save_pretrained(str(output_dir))
+    if backend == "unsloth":
+        # Unsloth: save merged 16-bit + LoRA adapter. Adapter để infer load bằng peft.
+        adapter_dir = output_dir / "adapter"
+        ensure_dir(adapter_dir)
+        model.save_pretrained(str(adapter_dir))
+        tokenizer.save_pretrained(str(adapter_dir))
+        # Also save a merged 16-bit checkpoint for standalone inference
+        try:
+            merged_dir = output_dir / "merged_16bit"
+            ensure_dir(merged_dir)
+            model.save_pretrained_merged(str(merged_dir), tokenizer, save_method="merged_16bit")
+        except Exception as e:  # noqa: BLE001
+            print(f"[train] warn: save_pretrained_merged failed: {e}")
+        # Point output_dir to adapter for downstream eval/infer (LoRA path)
+        trainer_save_dir = str(adapter_dir)
+    else:
+        trainer.save_model(str(output_dir))
+        tokenizer.save_pretrained(str(output_dir))
+        trainer_save_dir = str(output_dir)
 
     # Save config snapshot for reproducibility
     import json as _json
     with open(output_dir / "train_config.json", "w", encoding="utf-8") as f:
         _json.dump(cfg, f, ensure_ascii=False, indent=2, default=str)
 
-    return str(output_dir), str(output_dir)
+    return str(output_dir), trainer_save_dir

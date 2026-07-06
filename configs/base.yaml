@@ -21,3 +21,13 @@ attn_implementation: flash_attention_2
 
 # System prompt (cố định, dùng cả train và eval)
 system_prompt: "Bạn là hệ thống trả lời trắc nghiệm. Chỉ xuất duy nhất 1 ký tự A/B/C/D."
+
+# Chat template kwargs (truyền vào tokenizer.apply_chat_template).
+# Qwen3 mặc định ở thinking mode (sinh <think>...</think> trước đáp án) —
+# cần enable_thinking=False để model xuất A/B/C/D trực tiếp, khớp giữa train và infer.
+chat_template_kwargs:
+  enable_thinking: false
+
+# Training backend: "trl" (mặc định, HF + TRL SFTTrainer) hoặc "unsloth"
+# (FastLanguageModel + Triton kernels, nhanh ~2x, FA2 tích hợp sẵn).
+backend: trl

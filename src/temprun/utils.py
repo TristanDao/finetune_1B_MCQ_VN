@@ -128,3 +128,49 @@ def ensure_dir(path: str | os.PathLike) -> Path:
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def render_chat_for_training(tokenizer, messages: list[dict], kwargs: dict | None = None) -> str:
+    """Render messages thành 1 string cho SFT, đảm bảo khớp với infer.
+
+    Tách assistant message ra, render prefix (system+user) với
+    `add_generation_prompt=True` + `enable_thinking=False` (qua `kwargs`),
+    rồi append `assistant_content + eos`. Nhờ vậy train và infer dùng cùng
+    một prefix `<|im_start|>assistant\\n...` → model học xuất đáp án đúng vị trí.
+
+    Trả về string đã có eos. Nếu không có assistant message, chỉ render prefix
+    (dùng cho infer/generation).
+    """
+    assistant_content = None
+    prefix_msgs: list[dict] = []
+    for m in messages:
+        if m.get("role") == "assistant":
+            assistant_content = m.get("content", "")
+        else:
+            prefix_msgs.append(m)
+
+    render_kwargs: dict = {"tokenize": False, "add_generation_prompt": True}
+    if kwargs:
+        render_kwargs.update(kwargs)
+    text = tokenizer.apply_chat_template(prefix_msgs, **render_kwargs)
+
+    if assistant_content is not None:
+        text += assistant_content
+
+    eos = getattr(tokenizer, "eos_token", None)
+    if eos and not text.endswith(eos):
+        text += eos
+    return text
+
+
+def render_chat_for_inference(tokenizer, messages: list[dict], kwargs: dict | None = None) -> str:
+    """Render prefix (system+user) cho inference, với add_generation_prompt=True.
+
+    Bỏ qua assistant message nếu có. Truyền `enable_thinking=False` qua kwargs
+    để model không sinh  <=> cùng prefix với train.
+    """
+    prefix_msgs = [m for m in messages if m.get("role") != "assistant"]
+    render_kwargs: dict = {"tokenize": False, "add_generation_prompt": True}
+    if kwargs:
+        render_kwargs.update(kwargs)
+    return tokenizer.apply_chat_template(prefix_msgs, **render_kwargs)

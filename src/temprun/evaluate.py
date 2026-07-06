@@ -13,16 +13,25 @@ from typing import Any, Callable
 import torch
 from tqdm import tqdm
 
-from .utils import ensure_dir, get_letter_token_ids, parse_generated
+from .utils import ensure_dir, get_letter_token_ids, parse_generated, render_chat_for_inference
 
 
-def to_chat_prompt(tokenizer, instruction: str, system_prompt: str) -> str:
-    """Apply chat template to a (system, user) pair, return string for tokenization."""
+def to_chat_prompt(
+    tokenizer,
+    instruction: str,
+    system_prompt: str,
+    chat_kwargs: dict | None = None,
+) -> str:
+    """Apply chat template to a (system, user) pair, return string for tokenization.
+
+    Renders with `add_generation_prompt=True` + `enable_thinking=False` (qua
+    chat_kwargs) để model xuất A/B/C/D trực tiếp, khớp với train.
+    """
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": instruction},
     ]
-    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    return render_chat_for_inference(tokenizer, messages, kwargs=chat_kwargs)
 
 
 def eval_logits_mode(
@@ -115,16 +124,20 @@ def run_eval(
     mode: str = "logits",
     out_jsonl: str | Path | None = None,
     instruction_fn: Callable[[dict], str] | None = None,
+    chat_kwargs: dict | None = None,
 ) -> dict[str, Any]:
     """Run full evaluation. `rows` must have keys: 'instruction' (str) and 'label' (str).
 
     If `instruction_fn` is given, called as `instruction_fn(row)` to get the prompt
     text (allows custom row shapes). Otherwise expects row['instruction'].
+
+    `chat_kwargs` được truyền vào `apply_chat_template` (vd `enable_thinking=False`
+    cho Qwen3) để khớp với prefix dùng lúc train.
     """
     if instruction_fn is None:
         instruction_fn = lambda r: r["instruction"]  # noqa: E731
 
-    prompts = [to_chat_prompt(tokenizer, instruction_fn(r), system_prompt) for r in rows]
+    prompts = [to_chat_prompt(tokenizer, instruction_fn(r), system_prompt, chat_kwargs=chat_kwargs) for r in rows]
     labels = [r["label"] for r in rows]
     total = len(rows)
     all_details: list[dict] = []

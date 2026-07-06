@@ -102,3 +102,6 @@ tmp/
 temp/
 # COLAB_GUIDE.md
 notebooks/full_pipeline.ipynb
+docker-compose.yml
+configs/base.yaml
+baseline.yml

@@ -48,6 +48,18 @@ dev = [
   "ruff>=0.6.0",
   "ipykernel>=6.29.0",
 ]
+# Unsloth backend: chạy `pip install -e ".[unsloth]"` trên Colab/Kaggle/Runpod.
+# Unsloth pin khá chặt version torch/transformers/trl — nên dùng môi trường riêng,
+# không kết hợp với deps dev mặc định. Xem requirements-unsloth.txt để compile.
+unsloth = [
+  "unsloth>=0.1.471",
+  # flash-attn được Unsloth kéo theo qua wheel prebuilt; nếu cài thủ công
+  # thì cần build (~30-60 phút). Unsloth tự dùng FA2 nội bộ nên không bắt buộc.
+]
+flash = [
+  # FlashAttention-2 cho backend TRL thuần (Unsloth đã có sẵn).
+  "flash-attn>=2.5.0; sys_platform == 'linux'",
+]
 
 [project.scripts]
 temprun-train = "temprun.cli:main"

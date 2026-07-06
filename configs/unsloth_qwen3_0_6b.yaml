@@ -1,0 +1,57 @@
+# Unsloth QLoRA 4-bit finetune trên Qwen3-0.6B
+# Unsloth dùng Triton kernels + FA2 tích hợp sẵn → nhanh ~2x so với TRL thuần,
+# VRAM ít hơn. Adapter LoRA xuất ra vẫn nạp được bằng peft.PeftModel ở infer.
+#
+# Yêu cầu: `pip install -e ".[unsloth]"` (hoặc xem requirements-unsloth.txt).
+# Khuyến nghị chạy trên Colab/Kaggle/Runpod A100 hoặc L4.
+extends: base.yaml
+
+run_name: unsloth_qwen3_0_6b
+model_name: Qwen/Qwen3-0.6B
+
+# Dùng Unsloth FastLanguageModel thay vì HF + TRL thuần
+backend: unsloth
+
+# Quant (Unsloth tự xử lý load_in_4bit, không cần BitsAndBytesConfig)
+quant:
+  load_in_4bit: true
+  bnb_4bit_quant_type: nf4
+  bnb_4bit_use_double_quant: true
+  bnb_4bit_compute_dtype: bfloat16
+
+# LoRA
+lora:
+  r: 32
+  alpha: 16
+  dropout: 0.05
+  bias: none
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+# Training
+training:
+  per_device_train_batch_size: 8           # Unsloth tiết kiệm VRAM → batch lớn hơn được
+  per_device_eval_batch_size: 16
+  gradient_accumulation_steps: 4           # effective batch = 32
+  num_train_epochs: 3
+  max_steps: -1
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.06
+  lr_scheduler_type: cosine
+  logging_steps: 20
+  eval_steps: 200
+  save_steps: 200
+  save_total_limit: 2
+  max_grad_norm: 0.3
+  optim: adamw_8bit                         # Unsloth hỗ trợ adamw_8bit (paged)
+  gradient_checkpointing: true             # Unsloth dùng "unsloth" GC internally
+  packing: true
+  assistant_only_loss: true
+  seed: 3407

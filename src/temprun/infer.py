@@ -15,8 +15,14 @@ from .utils import ensure_dir, get_letter_token_ids, parse_generated, set_seed
 # Heavy ML deps are imported lazily inside functions.
 
 
-def load_model_for_inference(base_model: str, adapter_path: str | None, *, use_4bit: bool = True):
-    """Load model + tokenizer. If adapter_path is given, attach LoRA on top."""
+def load_model_for_inference(base_model: str, adapter_path: str | None, *, use_4bit: bool = True, attn_impl: str = "flash_attention_2"):
+    """Load model + tokenizer. If adapter_path is given, attach LoRA on top.
+
+    `attn_impl` defaults to "flash_attention_2" (nếu flash-attn chưa cài, HF
+    tự fallback sang sdpa/eager). Đối với Unsloth adapter, dùng
+    `FastLanguageModel.for_inference` nếu Unsloth có sẵn — nhưng peft path
+    chuẩn vẫn hoạt động.
+    """
     import torch
     from peft import PeftModel
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
@@ -32,14 +38,30 @@ def load_model_for_inference(base_model: str, adapter_path: str | None, *, use_4
         if use_4bit
         else None
     )
-    model = AutoModelForCausalLM.from_pretrained(
-        base_model,
-        device_map="auto",
-        torch_dtype=torch.bfloat16 if bf16 else torch.float16,
-        attn_implementation="eager",
-        trust_remote_code=True,
-        quantization_config=bnb,
-    )
+    # Try flash_attention_2 first; fall back silently if flash-attn not installed.
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            base_model,
+            device_map="auto",
+            torch_dtype=torch.bfloat16 if bf16 else torch.float16,
+            attn_implementation=attn_impl,
+            trust_remote_code=True,
+            quantization_config=bnb,
+        )
+    except Exception as e:  # noqa: BLE001
+        if "flash" in str(e).lower() or "FlashAttention" in str(e):
+            print(f"[infer] flash_attention_2 unavailable ({e}); falling back to sdpa")
+            model = AutoModelForCausalLM.from_pretrained(
+                base_model,
+                device_map="auto",
+                torch_dtype=torch.bfloat16 if bf16 else torch.float16,
+                attn_implementation="sdpa",
+                trust_remote_code=True,
+                quantization_config=bnb,
+            )
+        else:
+            raise
+
     if adapter_path:
         model = PeftModel.from_pretrained(model, adapter_path)
         # Merge for faster inference
@@ -108,6 +130,7 @@ def predict(
     batch_size: int = 16,
     max_length: int = 2048,
     mode: str = "logits",
+    chat_kwargs: dict | None = None,
 ) -> list[dict]:
     """Run inference; return [{row_id, pred}] list (in input order)."""
     from .evaluate import eval_generate_mode, eval_logits_mode, to_chat_prompt
@@ -116,7 +139,7 @@ def predict(
     prompts_text = [
         build_user_instruction(it["title"], it["content"], it["question"], it["choices"]) for it in items
     ]
-    prompts = [to_chat_prompt(tokenizer, t, system_prompt) for t in prompts_text]
+    prompts = [to_chat_prompt(tokenizer, t, system_prompt, chat_kwargs=chat_kwargs) for t in prompts_text]
 
     results: list[dict] = []
     current_mode = mode

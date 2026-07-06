@@ -1,0 +1,16 @@
+# Unsloth backend dependencies — compile riêng vì Unsloth pin chặt version.
+# Cài trên Colab/Kaggle/Runpod (Linux + CUDA 12.x):
+#   pip install -r requirements-unsloth.txt
+# hoặc:
+#   pip install -e ".[unsloth]"
+#
+# Unsloth tự kéo theo torch, transformers, trl, peft, bitsandbytes, flash-attn
+# (wheel prebuilt) với version tương thích. KHÔNG kết hợp với requirements.txt
+# mặc định — xài môi trường riêng.
+#
+# Lưu ý: Unsloth thường yêu cầu transformers & trl version khác pinned trong
+# requirements.txt. Nếu conflict, ưu tiên version Unsloth kéo theo.
+
+unsloth>=0.1.471
+# Các deps dưới đây được_UNSLOTH tự resolve; liệt kê để minh bạch.
+# transformers, trl, peft, bitsandbytes, accelerate, torch → theo Unsloth.
