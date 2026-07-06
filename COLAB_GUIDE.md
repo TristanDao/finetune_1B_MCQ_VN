@@ -13,6 +13,7 @@ Step-by-step blocks to run this project on a fresh Colab Pro+ A100 session.
 | 5 | Evaluate + compare | `05_evaluate.ipynb` | 5 min |
 | 6 | Generate submission | `06_infer_submission.ipynb` | 5 min |
 | 7 | Push model to HF Hub (optional) | `07_push_hf.ipynb` | 5–15 min |
+| 8 | **Full pipeline (Unsloth + FA2, 1 notebook)** | `08_full_pipeline_unsloth.ipynb` | 30–50 min |
 
 ## BƯỚC 0a — Upload data to HF (local, one-time)
 
