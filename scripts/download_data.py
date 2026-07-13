@@ -147,7 +147,7 @@ def main() -> int:
         print("[download] no train/test/public/private split found", file=sys.stderr)
         return 1
 
-    for split, p in extracted.items():
+    for _split, p in extracted.items():
         n_files = sum(1 for _ in p.glob("*.json"))
         print(f"[download] ready: {p}  ({n_files} files)")
     return 0

@@ -1,11 +1,23 @@
-"""Prompt construction (training + evaluation)."""
+"""Prompt construction: two training modes — conversation (short answer) and
+Chain-of-Thought (with explanation step-by-step)."""
+
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-DEFAULT_SYSTEM_PROMPT = (
+Mode = Literal["conversation", "cot"]
+
+SYSTEM_PROMPT_CONVERSATION = (
     "Bạn là hệ thống trả lời trắc nghiệm. Chỉ xuất duy nhất 1 ký tự A/B/C/D."
 )
+
+SYSTEM_PROMPT_COT = (
+    "Bạn là một chuyên gia giải quyết vấn đề xuất sắc. Nhiệm vụ của bạn là đọc kỹ văn bản, "
+    "câu hỏi và các lựa chọn, suy luận từng bước dựa trên thông tin trong bài. "
+    "Cuối cùng, bắt buộc chốt lại bằng định dạng chính xác: 'Do đó, đáp án đúng là [A/B/C/D]'."
+)
+
+ASSISTANT_TEMPLATE_COT = "{explanation}\n\nDo đó, đáp án đúng là {label}."
 
 
 def format_choices(choices: dict[str, str]) -> str:
@@ -26,13 +38,25 @@ def build_user_instruction(
     content: str,
     question: str,
     choices: dict[str, str],
+    *,
+    mode: Mode = "conversation",
 ) -> str:
     """Build the user-message text for a single MCQ item.
 
-    Vietnamese prompt; deterministic A-D ordering; instructs the model to output
-    exactly one letter, no explanation.
+    ``conversation`` mode: plain text, short prompt, direct answer.
+    ``cot`` mode: markdown-structured sections, Chain-of-Thought prompt.
     """
     choices_text = format_choices(choices)
+
+    if mode == "cot":
+        return (
+            f"### VĂN BẢN\n"
+            f"**Tiêu đề:** {title}\n"
+            f"**Nội dung:**\n{content}\n\n"
+            f"### CÂU HỎI\n{question}\n\n"
+            f"### LỰA CHỌN\n{choices_text}\n\n"
+            f"Vui lòng cung cấp đáp án của bạn (A, B, C, hoặc D):"
+        )
     return (
         "Bạn là hệ thống trả lời trắc nghiệm. Hãy đọc văn bản và câu hỏi, "
         "chỉ chọn **một đáp án duy nhất** từ A/B/C/D, không giải thích, không thêm nội dung khác.\n\n"
@@ -47,19 +71,38 @@ def build_user_instruction(
     )
 
 
-def build_chat_messages(
-    system_prompt: str,
-    user_instruction: str,
-    assistant: str | None = None,
+def build_assistant(label: str, *, explanation: str | None = None, mode: Mode = "conversation") -> str:
+    """Build assistant response string.
+
+    ``conversation`` mode: just the letter (e.g. "A").
+    ``cot`` mode: explanation + "Do đó, đáp án đúng là {label}."
+    """
+    if mode == "cot":
+        if explanation:
+            return ASSISTANT_TEMPLATE_COT.format(explanation=explanation, label=label)
+        return f"Do đó, đáp án đúng là {label}."
+    return label
+
+
+def build_messages(
+    title: str,
+    content: str,
+    question: str,
+    choices: dict[str, str],
+    label: str,
+    *,
+    explanation: str | None = None,
+    mode: Mode = "conversation",
 ) -> list[dict[str, str]]:
-    """Return OpenAI-style messages list."""
-    msgs: list[dict[str, str]] = [
+    """Build OpenAI-style [system, user, assistant] messages for one MCQ row."""
+    system_prompt = SYSTEM_PROMPT_COT if mode == "cot" else SYSTEM_PROMPT_CONVERSATION
+    user = build_user_instruction(title, content, question, choices, mode=mode)
+    assistant = build_assistant(label, explanation=explanation, mode=mode)
+    return [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_instruction},
+        {"role": "user", "content": user},
+        {"role": "assistant", "content": assistant},
     ]
-    if assistant is not None:
-        msgs.append({"role": "assistant", "content": assistant})
-    return msgs
 
 
 def make_row(
@@ -68,32 +111,21 @@ def make_row(
     content: str,
     question: str,
     choices: dict[str, str],
-    label: str | None,
-    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+    label: str,
+    explanation: str | None = None,
+    mode: Mode = "conversation",
 ) -> dict[str, Any]:
-    """Build a single training/eval row in our standard schema.
-
-    Schema (JSONL):
-        {
-          "messages": [system, user, assistant?],
-          "label": "A"|"B"|"C"|"D",   # for eval only
-          "title": str,
-          "content": str,
-          "question": str,
-          "choices": dict[str, str],
-          "row_id": "..."              # optional, for submission
-        }
-    """
-    user = build_user_instruction(title, content, question, choices)
-    assistant = label.strip().upper()[:1] if label is not None else None
-    msgs = build_chat_messages(system_prompt, user, assistant=assistant)
+    """Build a single training/eval row with messages, label, and metadata."""
+    msgs = build_messages(title, content, question, choices, label,
+                          explanation=explanation, mode=mode)
     row: dict[str, Any] = {
         "messages": msgs,
         "title": title,
         "content": content,
         "question": question,
         "choices": choices,
+        "label": label,
     }
-    if label is not None:
-        row["label"] = label.strip().upper()[:1]
+    if explanation:
+        row["explanation"] = explanation
     return row

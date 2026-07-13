@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "temprun"
-version = "0.1.0"
-description = "Finetune small LLM (<1B) for Vietnamese multiple-choice QA on news (Tempo Run 2025)"
+version = "0.2.0"
+description = "Finetune small LLM (<1B) for Vietnamese multiple-choice QA — Unsloth + QLoRA"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "TristanDao" }]
-keywords = ["llm", "finetune", "qlora", "vietnamese", "mcq", "tempo-run-2025"]
+keywords = ["llm", "finetune", "qlora", "vietnamese", "mcq", "unsloth"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
@@ -22,6 +22,7 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
+  "unsloth>=0.1.471",
   "transformers>=4.45.0",
   "datasets>=2.20.0",
   "accelerate>=0.34.0",
@@ -36,9 +37,7 @@ dependencies = [
   "scikit-learn>=1.5.0",
   "pyyaml>=6.0",
   "python-dotenv>=1.0.0",
-  "kagglehub>=0.3.0",
   "huggingface-hub>=0.24.0",
-  "openai>=1.107.0",
 ]
 
 [project.optional-dependencies]
@@ -48,21 +47,6 @@ dev = [
   "ruff>=0.6.0",
   "ipykernel>=6.29.0",
 ]
-# Unsloth backend: chạy `pip install -e ".[unsloth]"` trên Colab/Kaggle/Runpod.
-# Unsloth pin khá chặt version torch/transformers/trl — nên dùng môi trường riêng,
-# không kết hợp với deps dev mặc định. Xem requirements-unsloth.txt để compile.
-unsloth = [
-  "unsloth>=0.1.471",
-  # flash-attn được Unsloth kéo theo qua wheel prebuilt; nếu cài thủ công
-  # thì cần build (~30-60 phút). Unsloth tự dùng FA2 nội bộ nên không bắt buộc.
-]
-flash = [
-  # FlashAttention-2 cho backend TRL thuần (Unsloth đã có sẵn).
-  "flash-attn>=2.5.0; sys_platform == 'linux'",
-]
-
-[project.scripts]
-temprun-train = "temprun.cli:main"
 
 [project.urls]
 "Homepage" = "https://github.com/TristanDao/finetune_1B_MCQ_VN"

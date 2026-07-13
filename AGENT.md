@@ -1,56 +1,67 @@
 # AGENT.md — Tempo Run 2025 (MCQ Tiếng Việt, <1B params)
 
-Contract for AI agents (and humans) working on this repo. Read this before
-editing anything.
+Contract for AI agents (and humans) working on this repo.
 
 ## Goal
-Finetune a sub-1B LLM on Vietnamese MCQ reading comprehension (4,491 train
-questions, 1,488 test questions). Metric: **accuracy** on the public/private
-test sets. Constraint: total model params < 1B; no test-set leakage.
+Fine-tune a sub-1B LLM on Vietnamese MCQ reading comprehension (4,491 train
+questions, 1,500 articles). Two training modes: **conversation** (direct answer)
+and **Chain-of-Thought** (step-by-step reasoning). Metric: **accuracy** on
+held-out eval split and public/private test sets.
 
-## Locked decisions
+## Locked Decisions
+
 | | Choice | Why |
 |---|---|---|
-| Base model | `Qwen/Qwen3-0.6B` | <1B cap, decent Vietnamese, sub-1s inference |
-| Methods | QLoRA 4-bit + Full FT bf16, side by side | Compare on identical data, A100 budget |
-| Sequence length | 2048 | Covers ~80% of articles (median 1.2k tokens) |
-| Prompt | Vietnamese, deterministic A–D order, single-token target | Fast argmax inference |
-| Eval mode | `logits` (primary) → `generate` (fallback) | 5–10× faster than greedy decoding |
-| Data enrichment | DashScope `qwen3-max-preview` paraphrase + explanation | Free 1M-token tier |
-| Data source | HF private dataset `ThinhDao/TempoRun2025_UIT` | Data redistribution is forbidden; private HF repo is reproducible-by-token |
+| Base model | `Qwen/Qwen3-0.6B` | <1B cap, good Vietnamese, single-token A/B/C/D |
+| Backend | Unsloth only | Triton kernels + FA2 built-in, ~2× faster |
+| Quantization | QLoRA 4-bit (NF4) | Fits T4 (15GB), no accuracy loss vs full FT |
+| Prompt | Vietnamese, deterministic A–D order | No English leakage, reproducible outputs |
+| Chat template | `enable_thinking=False` | Qwen3 defaults to `<think>` mode — blocks it |
+| Loss masking | `train_on_responses_only` | Only the assistant turn contributes to loss |
+| Label balancing | Choice rotation (no API) | A→B→C→D cycle per row, ~25% per label |
+| Eval | Logits-mode (argmax over 4 tokens) | Single forward pass, 5–10× faster than generation |
+| Data source | HF private dataset | Competition forbids redistribution |
 
-## Code conventions
-- Python ≥ 3.10, full type hints
-- `src/temprun/` is the package — install with `pip install -e .`
-- Hyperparameters live in YAML (`configs/`), never hardcoded in `.py`
-- CLI scripts in `scripts/`, one per pipeline stage; notebooks are glue only
-- Test with `PYTHONPATH=src pytest -q` (33 smoke tests)
+## Project Structure
+
+```
+src/temprun/
+├── prompts.py    # Dual-mode: conversation / Chain-of-Thought
+├── data.py       # JSON → JSONL, label balancing, stratified split
+├── train.py      # Unsloth + QLoRA + SFTTrainer
+├── evaluate.py   # Logits-mode eval + confusion matrix
+├── infer.py      # Test inference → submission CSV
+└── utils.py      # Chat rendering, seeding, letter-token extraction
+
+scripts/          # One script per pipeline stage
+configs/          # Reference hyperparameters
+tests/            # 33 pytest smoke tests
+```
 
 ## Pipeline
+
 ```
-LOCAL ONE-TIME:
-  upload_data_to_hf.py  →  Hugging Face private dataset
-
-EACH COLAB SESSION:
-  download_data.py   →  data/raw/{train,test,sample_submission.csv}
-  make_sft_jsonl.py  →  data/processed/{train,eval}.jsonl
-  enrich_data.py     →  data/processed/enriched.jsonl     (optional)
-  merge_enriched.py  →  data/processed/final/{train,eval}.jsonl
-  train.py           →  artifacts/<run>/
-  evaluate.py        →  artifacts/<run>/eval_details.jsonl.summary.json
-  infer.py           →  submissions/sub_<run>.csv
+download_data.py       → data/raw/{train,test}/
+make_sft_jsonl.py      → data/processed/final/{train,eval}.jsonl
+  --mode {conversation|cot}
+train.py               → artifacts/<run>/adapter/
+  --mode {conversation|cot}
+evaluate.py            → eval_details.jsonl + summary.json
+  --adapter artifacts/<run>/adapter
+infer.py               → submissions/sub.csv
+  --adapter artifacts/<run>/adapter
 ```
 
-## Repo state
-- **Commit**: source, configs, notebooks, tests, docs
-- **Never commit**: data, artifacts, submissions, reports/*.json, .env, *.zip
-- **Push to HF** (when results are good): LoRA adapter (~50–100MB) or merged model (~1.2GB)
+## Code Conventions
 
-## Known quirks
-- A few JSONs have empty `content` (3 train + 4 test) — code drops them, no crash
-- Some test files have no `questions` — skipped, no `row_id` emitted for them
-- `A`/`B`/`C`/`D` must be single-token (verified for Qwen3 tokenizer; if a
-  different base is used, the evaluator auto-falls back to `generate` mode)
-- W&B is disabled by default; enable with `export WANDB_MODE=online` if needed
-- **Never push data, checkpoints, or submission CSVs to GitHub.** All large
-  artifacts go through HF (private) or Drive (personal).
+- Python ≥ 3.10
+- `src/temprun/` is the installable package (`pip install -e .`)
+- Hyperparameters as CLI args (not YAML configs); configs/ are reference only
+- Test: `python -m pytest tests/ -v`
+- Lint: `python -m ruff check src/ scripts/ tests/`
+
+## Never Commit
+
+- `data/`, `artifacts/`, `submissions/`, `reports/`
+- `.env`, `*.zip`, `*.bin`, `*.safetensors`
+- Notebook output cells (clear before commit)

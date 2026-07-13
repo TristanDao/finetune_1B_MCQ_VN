@@ -1,36 +1,14 @@
-"""Tests for data loading: requires the kaggle data zip at repo root
-(tempo-run-2025-run-with-ai-break-limits.zip) OR a pre-extracted tree.
+"""Tests for data pipeline: build_rows, balance, stratified split."""
 
-Skipped automatically if neither is present.
-"""
 from __future__ import annotations
 
-import json
-import zipfile
-from pathlib import Path
-
-import pytest
-
-from temprun.data import _get_content, _get_title, build_rows, label_distribution, stratified_split
-from temprun.utils import repo_root
-
-
-@pytest.fixture(scope="module")
-def raw_train_dir(tmp_path_factory) -> Path:
-    """Extract a small slice of train/ from the kaggle zip to a temp dir."""
-    zip_path = repo_root() / "tempo-run-2025-run-with-ai-break-limits.zip"
-    if not zip_path.exists():
-        pytest.skip("kaggle zip not present at repo root")
-    out = Path(tmp_path_factory.mktemp("raw_train"))
-    with zipfile.ZipFile(zip_path) as z:
-        members = [n for n in z.namelist() if n.startswith("Dataset/Dataset/train/") and n.endswith(".json")]
-        # Sample first 30 files to keep test fast
-        for m in members[:30]:
-            z.extract(m, out)
-    train_dir = out / "Dataset" / "Dataset" / "train"
-    if not train_dir.exists() or not any(train_dir.iterdir()):
-        pytest.skip("could not extract train files")
-    return train_dir
+from temprun.data import (
+    _get_content,
+    _get_title,
+    balance_via_reorder,
+    label_distribution,
+    stratified_split,
+)
 
 
 def test_get_content_handles_both_keys():
@@ -46,17 +24,6 @@ def test_get_title_handles_both_keys():
     assert _get_title({}) == ""
 
 
-def test_build_rows_smoke(raw_train_dir):
-    rows, dropped = build_rows(raw_train_dir)
-    assert len(rows) > 0
-    for r in rows:
-        assert r["label"] in {"A", "B", "C", "D"}
-        assert len(r["messages"]) == 3
-    # Dist is roughly balanced
-    dist = label_distribution(rows)
-    assert all(k in dist for k in ["A", "B", "C", "D"])
-
-
 def test_stratified_split_preserves_distribution():
     rows = [{"label": c} for c in (["A"] * 50 + ["B"] * 30 + ["C"] * 15 + ["D"] * 5)]
     train, evald = stratified_split(rows, test_size=0.2, seed=42)
@@ -65,3 +32,68 @@ def test_stratified_split_preserves_distribution():
     evald_dist = label_distribution(evald)
     for k in ["A", "B", "C", "D"]:
         assert k in train_dist and k in evald_dist
+
+
+def _reorder_row(label: str, qid: int) -> dict:
+    return {
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": f"q{qid}?"},
+            {"role": "assistant", "content": label},
+        ],
+        "title": f"t-{qid}",
+        "content": "body",
+        "question": f"q{qid}?",
+        "choices": {"A": "1", "B": "2", "C": "3", "D": "4"},
+        "label": label,
+    }
+
+
+def test_reorder_row_rotates_choices():
+    from temprun.data import _reorder_row_for_label
+
+    row = _reorder_row("A", 1)
+    out = _reorder_row_for_label(row, "C", mode="conversation")
+    assert out["choices"] == {"A": "3", "B": "4", "C": "1", "D": "2"}
+    assert out["label"] == "C"
+    assert out["messages"][2]["content"] == "C"
+    assert "C: 1" in out["messages"][1]["content"]
+
+
+def test_reorder_row_noop_when_already_correct():
+    from temprun.data import _reorder_row_for_label
+
+    row = _reorder_row("B", 1)
+    out = _reorder_row_for_label(row, "B", mode="conversation")
+    assert out is row
+
+
+def test_balance_via_reorder_distributes_evenly():
+    rows = [_reorder_row("A", i) for i in range(40)]
+    out = balance_via_reorder(rows, seed=3407)
+    counts = {"A": 0, "B": 0, "C": 0, "D": 0}
+    for r in out:
+        counts[r["label"]] += 1
+    assert counts == {"A": 10, "B": 10, "C": 10, "D": 10}
+
+
+def test_balance_via_reorder_is_deterministic():
+    rows = [_reorder_row("A", i) for i in range(20)] + [_reorder_row("B", i) for i in range(20)]
+    out1 = balance_via_reorder(rows, seed=42)
+    out2 = balance_via_reorder(rows, seed=42)
+    pairs1 = [(r["label"], r.get("row_id", r["question"])) for r in out1]
+    pairs2 = [(r["label"], r.get("row_id", r["question"])) for r in out2]
+    assert pairs1 == pairs2
+    out3 = balance_via_reorder(rows, seed=99)
+    pairs3 = [(r["label"], r.get("row_id", r["question"])) for r in out3]
+    assert pairs1 != pairs3
+
+
+def test_balance_via_reorder_preserves_correct_text():
+    rows = [_reorder_row("B", i) for i in range(8)]
+    out = balance_via_reorder(rows, seed=3407)
+    by_question = {r["question"]: r for r in rows}
+    for r in out:
+        orig = by_question[r["question"]]
+        orig_text = orig["choices"][orig["label"]]
+        assert r["choices"][r["label"]] == orig_text
