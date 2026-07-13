@@ -58,12 +58,11 @@ Thumbs.db
 # Data & artifacts (do NOT push to GitHub)
 data/raw/
 data/processed/
+data/.hf_cache/
 artifacts/*
 !artifacts/.gitkeep
 submissions/*
 !submissions/.gitkeep
-reports/*
-!reports/.gitkeep
 !data/.gitkeep
 *.zip
 *.tar.gz
@@ -101,7 +100,3 @@ kaggle.json
 tmp/
 temp/
 # COLAB_GUIDE.md
-notebooks/full_pipeline.ipynb
-docker-compose.yml
-configs/base.yaml
-baseline.yml
